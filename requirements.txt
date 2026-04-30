@@ -3,3 +3,4 @@ CoolProp
 pandas
 PyMuPDF
 pypdf
+xlsxwriter
