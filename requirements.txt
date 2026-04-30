@@ -1,0 +1,5 @@
+streamlit
+CoolProp
+pandas
+PyMuPDF
+pypdf
