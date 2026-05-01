@@ -706,7 +706,7 @@ def water_form(total_cap: float) -> Water:
         dp=nfloat("Evaporator ΔP kPa",50.0,"evapdp",5.0,0.0)
         pipe=nfloat("Water pipe mm",65.0,"waterpipe",5.0,0.0)
     with c3:
-        pumpqty=int(st.number_input("Pump qty",1,1,4,1,key="pumpqty"))
+        pumpqty=int(st.number_input("Pump qty", min_value=1, max_value=4, value=1, step=1, key="pumpqty"))
         pumparr=st.selectbox("Pump arrangement", ["Single duty", "1 duty + 1 standby", "2 duty parallel", "External pump only"])
         head=nfloat("Pump head m",20.0,"pumphead",1.0,0.0)
         pkw=nfloat("Pump motor kW",3.7,"pumpkw",0.1,0.0)
@@ -724,7 +724,7 @@ def water_form(total_cap: float) -> Water:
 def fan_form() -> Fan:
     c1,c2,c3,c4=st.columns(4)
     with c1:
-        qty=int(st.number_input("No. of condenser fans",2,0,20,1))
+        qty=int(st.number_input("No. of condenser fans", min_value=0, max_value=20, value=2, step=1, key="fan_qty"))
         kw=nfloat("Fan kW each",0.75,"fankw",0.05,0.0)
     with c2:
         flc=nfloat("Fan FLC A each (0=estimate)",0.0,"fanflc",0.1,0.0)
@@ -735,7 +735,7 @@ def fan_form() -> Fan:
         cont=st.checkbox("Contactor per fan", True)
     with c4:
         ol=st.checkbox("Overload per fan", True)
-        delay=int(st.number_input("Fan stage delay sec",10,0,120,5))
+        delay=int(st.number_input("Fan stage delay sec", min_value=0, max_value=120, value=10, step=5, key="fan_stage_delay"))
     return Fan(qty,kw,flc,volt,phase,ctrl,cont,ol,delay)
 
 
@@ -768,20 +768,20 @@ def logic_form(project: Project) -> Logic:
         pd=st.checkbox("Pump-down YV1+LPS",True)
         frz=nfloat("Freeze stat °C",3.0,"frz",0.5)
     with c2:
-        pstart=int(st.number_input("Pump start delay sec",30,0,300,5))
-        flow=int(st.number_input("Flow proving delay sec",10,0,120,5))
-        poff=int(st.number_input("Pump off delay sec",120,0,600,10))
+        pstart=int(st.number_input("Pump start delay sec", min_value=0, max_value=300, value=30, step=5, key="pump_start_delay"))
+        flow=int(st.number_input("Flow proving delay sec", min_value=0, max_value=120, value=10, step=5, key="flow_proving_delay"))
+        poff=int(st.number_input("Pump off delay sec", min_value=0, max_value=600, value=120, step=10, key="pump_off_delay"))
     with c3:
-        lp=int(st.number_input("LP bypass delay sec",60,0,300,5))
-        ast=int(st.number_input("Anti-short-cycle sec",180,0,900,30))
-        minon=int(st.number_input("Min compressor ON sec",120,0,900,30))
-        pdmax=int(st.number_input("Max pumpdown sec",90,0,600,10))
+        lp=int(st.number_input("LP bypass delay sec", min_value=0, max_value=300, value=60, step=5, key="lp_bypass_delay"))
+        ast=int(st.number_input("Anti-short-cycle sec", min_value=0, max_value=900, value=180, step=30, key="anti_short_cycle"))
+        minon=int(st.number_input("Min compressor ON sec", min_value=0, max_value=900, value=120, step=30, key="min_comp_on"))
+        pdmax=int(st.number_input("Max pumpdown sec", min_value=0, max_value=600, value=90, step=10, key="max_pumpdown"))
     with c4:
         pre=nfloat("Crankcase preheat h",8.0,"preheat",1.0,0.0)
         lead=st.checkbox("Lead/lag rotation",project.configuration.startswith("Tandem"))
         s2on=nfloat("Stage 2 ON offset K",2.0,"s2on",0.5,0.0)
         s2off=nfloat("Stage 2 OFF offset K",0.5,"s2off",0.5,0.0)
-        lag=int(st.number_input("Lag start delay sec",120,0,900,30))
+        lag=int(st.number_input("Lag start delay sec", min_value=0, max_value=900, value=120, step=30, key="lag_start_delay"))
     return Logic(sp,diff,pd,pstart,flow,lp,ast,minon,pdmax,poff,frz,pre,lead,s2on,s2off,lag)
 
 
@@ -802,10 +802,42 @@ def excel_report(project, circuits, water, fan, elec, logic, ps_dfs, specs, elec
     return out.getvalue()
 
 
+
+# ---------------- password protection ----------------
+
+def check_password() -> bool:
+    """Password gate using Streamlit secrets.
+
+    Required secret:
+        APP_PASSWORD = "your-password"
+    """
+    try:
+        expected_password = st.secrets["APP_PASSWORD"]
+    except Exception:
+        st.error("APP_PASSWORD is not set in Streamlit secrets.")
+        st.info("Streamlit Cloud: Manage app → Settings → Secrets, then add: APP_PASSWORD = \"your-password\"")
+        return False
+
+    if st.session_state.get("password_ok", False):
+        return True
+
+    st.title("Chiller App Login")
+    entered_password = st.text_input("Enter app password", type="password")
+    if st.button("Login"):
+        if entered_password == expected_password:
+            st.session_state["password_ok"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
+
 # ---------------- main app ----------------
 
 def main():
     st.set_page_config(page_title="Chiller Circuit + BOM Generator", layout="wide")
+    if not check_password():
+        st.stop()
     st.title("Chiller Electrical, Freon and Chilled Water Circuit Generator")
     st.caption("Full preliminary Streamlit app: inputs → pressure switch settings → schematics → component specifications → BOM.")
     with st.sidebar:
