@@ -16,6 +16,8 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+APP_VERSION = "v3-pandas3-excel-fix"
+
 try:
     from CoolProp.CoolProp import PropsSI
 except Exception:
@@ -819,12 +821,12 @@ def excel_report(project, circuits, water, fan, elec, logic, ps_dfs, specs, elec
             rows += [{"Section":section,"Input":k,"Value":v} for k,v in asdict(obj).items()]
         for c in circuits:
             rows += [{"Section":c.name,"Input":k,"Value":v} for k,v in asdict(c).items()]
-        pd.DataFrame(rows).to_excel(writer,"Inputs",index=False)
-        if ps_dfs: pd.concat(ps_dfs,ignore_index=True).to_excel(writer,"Pressure Settings",index=False)
-        specs.to_excel(writer,"Component Specs",index=False)
-        elec_sel.to_excel(writer,"Electrical Selection",index=False)
-        bom.to_excel(writer,"BOM",index=False)
-        pd.DataFrame([{"Note":"Preliminary app output only. Verify all component selections, wiring, pressure settings and code compliance before manufacturing."}]).to_excel(writer,"Notes",index=False)
+        pd.DataFrame(rows).to_excel(writer, sheet_name="Inputs",index=False)
+        if ps_dfs: pd.concat(ps_dfs,ignore_index=True).to_excel(writer, sheet_name="Pressure Settings",index=False)
+        specs.to_excel(writer, sheet_name="Component Specs",index=False)
+        elec_sel.to_excel(writer, sheet_name="Electrical Selection",index=False)
+        bom.to_excel(writer, sheet_name="BOM",index=False)
+        pd.DataFrame([{"Note":"Preliminary app output only. Verify all component selections, wiring, pressure settings and code compliance before manufacturing."}]).to_excel(writer, sheet_name="Notes",index=False)
     return out.getvalue()
 
 
