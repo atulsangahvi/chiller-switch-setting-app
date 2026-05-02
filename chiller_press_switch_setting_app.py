@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import base64
 import io
+import zipfile
+from datetime import datetime
 import math
 import re
 from dataclasses import dataclass, asdict
@@ -16,7 +18,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-APP_VERSION = "v5-electrical-schedules-parts-checks"
+APP_VERSION = "v7-manufacturing-package"
 
 try:
     from CoolProp.CoolProp import PropsSI
@@ -915,6 +917,286 @@ def bom_from(specs: pd.DataFrame, elec_sel: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def refrigeration_part(kind: str, c: Circuit, device: str = "") -> str:
+    """Preliminary candidate refrigeration control part numbers.
+
+    These are catalogue-family suggestions only. Final exact part number depends on
+    connection size, pressure range, coil voltage, refrigerant approval, reset type,
+    ambient rating and local availability.
+    """
+    ref = c.refrigerant
+    liq_mm = c.liquid_line_mm
+    if kind == "hps":
+        return "Danfoss KP 5 / KP 15 high pressure control - verify range and reset"
+    if kind == "lps":
+        return "Danfoss KP 1 / KP 15 low pressure control - verify range"
+    if kind == "cps":
+        return "Danfoss KP 5 / RT pressure control for condenser fan cycling"
+    if kind == "yv1":
+        if liq_mm <= 10:
+            return f"Danfoss EVR 6 solenoid valve + coil, {ref}"
+        if liq_mm <= 16:
+            return f"Danfoss EVR 10/15 solenoid valve + coil, {ref}"
+        return f"Danfoss EVR 20+ solenoid valve + coil, {ref} - size by capacity"
+    if kind == "yv2":
+        return "Danfoss EVR hot gas solenoid + KVC/CPCE style HGBP control - engineer size"
+    if kind == "filter":
+        return "Danfoss DML/DCL filter drier - size by line and refrigerant"
+    if kind == "sight":
+        return "Danfoss SGI/SGN sight glass moisture indicator"
+    if kind == "txv":
+        return "Danfoss TE/ETS valve family - select by capacity, refrigerant and pressure drop"
+    return "Vendor select"
+
+
+def refrigeration_controls_selection(circuits: List[Circuit], unit: str) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for c in circuits:
+        df, warns, vals = pressure_settings(c, unit)
+        if not vals:
+            continue
+        rows += [
+            {
+                "Circuit": c.name,
+                "Tag": f"HPS-{c.name[-1] if c.name[-1].isdigit() else '1'}",
+                "Component": "High pressure safety switch",
+                "Pressure setting": ptxt(vals.get("hps_cutout", float("nan")), unit),
+                "Pressure range required": "High side, manual reset preferred",
+                "Candidate part no.": refrigeration_part("hps", c),
+                "Notes": "Must be below compressor/system maximum high-side pressure."
+            },
+            {
+                "Circuit": c.name,
+                "Tag": f"LPS-{c.name[-1] if c.name[-1].isdigit() else '1'}",
+                "Component": "Low pressure switch",
+                "Pressure setting": f"Cut-in {ptxt(vals.get('lps_cutin', float('nan')), unit)} / cut-out {ptxt(vals.get('lps_cutout', float('nan')), unit)}",
+                "Pressure range required": "Low side, auto reset for pump-down",
+                "Candidate part no.": refrigeration_part("lps", c),
+                "Notes": "Pump-down and low suction protection."
+            },
+            {
+                "Circuit": c.name,
+                "Tag": "CPS1",
+                "Component": "Condenser fan stage 1 pressure switch",
+                "Pressure setting": f"ON {ptxt(vals.get('cps1_on', float('nan')), unit)} / OFF {ptxt(vals.get('cps1_off', float('nan')), unit)}",
+                "Pressure range required": "High side fan cycling",
+                "Candidate part no.": refrigeration_part("cps", c),
+                "Notes": "Starts first condenser fan stage."
+            },
+            {
+                "Circuit": c.name,
+                "Tag": "CPS2",
+                "Component": "Condenser fan stage 2 pressure switch",
+                "Pressure setting": f"ON {ptxt(vals.get('cps2_on', float('nan')), unit)} / OFF {ptxt(vals.get('cps2_off', float('nan')), unit)}",
+                "Pressure range required": "High side fan cycling",
+                "Candidate part no.": refrigeration_part("cps", c),
+                "Notes": "Starts second condenser fan stage."
+            },
+        ]
+        if c.liquid_solenoid_yv1:
+            rows.append({
+                "Circuit": c.name,
+                "Tag": "YV1",
+                "Component": "Liquid line solenoid valve",
+                "Pressure setting": "Controlled by TC1 demand",
+                "Pressure range required": f"Liquid line {c.liquid_line_mm:.1f} mm, {c.refrigerant}",
+                "Candidate part no.": refrigeration_part("yv1", c),
+                "Notes": "Used for pump-down control."
+            })
+        if c.hot_gas_bypass_yv2:
+            rows.append({
+                "Circuit": c.name,
+                "Tag": "YV2/HGBP",
+                "Component": "Hot gas bypass solenoid / regulator",
+                "Pressure setting": f"Open {ptxt(vals.get('hgb_open', float('nan')), unit)} / close {ptxt(vals.get('hgb_close', float('nan')), unit)}",
+                "Pressure range required": "Discharge to evaporator inlet/distributor",
+                "Candidate part no.": refrigeration_part("yv2", c),
+                "Notes": "Opens before LPS cut-out under low load."
+            })
+    return pd.DataFrame(rows)
+
+
+def cable_schedule(project: Project, circuits: List[Circuit], water: Water, fan: Fan, elec: Electrical) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    comp_qty = project.number_of_compressors if project.configuration.startswith("Tandem") else len(circuits)
+    for i in range(comp_qty):
+        c = circuits[0] if project.configuration.startswith("Tandem") else circuits[i]
+        flc = c.compressor_flc_a if c.compressor_flc_a > 0 else flc_3ph(c.compressor_kw, elec.main_voltage_v)
+        rows.append({
+            "Cable tag": f"CAB-C{i+1}",
+            "From": f"OL-C{i+1}",
+            "To": f"M-C{i+1} compressor",
+            "Load": f"{c.compressor_kw:.1f} kW compressor",
+            "FLC A": round(flc, 2),
+            "Cable recommendation": power_cable_desc(flc),
+            "Basis": "125% current basis, Cu PVC/PVC - verify installation derating"
+        })
+    pump_flc = water.pump_flc_a if water.pump_flc_a > 0 else flc_3ph(water.pump_kw, elec.main_voltage_v)
+    rows.append({
+        "Cable tag": "CAB-P1",
+        "From": "OL-P1",
+        "To": "M-P1 chilled water pump",
+        "Load": f"{water.pump_kw:.1f} kW pump",
+        "FLC A": round(pump_flc, 2),
+        "Cable recommendation": power_cable_desc(pump_flc),
+        "Basis": "125% current basis, Cu PVC/PVC - verify installation derating"
+    })
+    fan_flc = fan.flc_a_each if fan.flc_a_each > 0 else motor_flc(fan.motor_kw_each, fan.voltage_v, fan.phase)
+    for i in range(max(0, fan.qty)):
+        rows.append({
+            "Cable tag": f"CAB-F{i+1}",
+            "From": f"OL-F{i+1 if i < 2 else 'X'}",
+            "To": f"M-F{i+1} condenser fan",
+            "Load": f"{fan.motor_kw_each:.2f} kW fan",
+            "FLC A": round(fan_flc, 2),
+            "Cable recommendation": power_cable_desc(max(0.5, fan_flc), fan.phase),
+            "Basis": "125% current basis. Grouped fan circuits must be recalculated."
+        })
+    rows += [
+        {"Cable tag":"CW-CTRL-01", "From":"Panel", "To":"Field safety switches", "Load":"FS1/HPS/LPS/FRZ/CPS", "FLC A":0.0, "Cable recommendation":control_cable_desc(1.5, 12), "Basis":"Control cable, numbered cores preferred"},
+        {"Cable tag":"CW-BMS-01", "From":"Panel", "To":"BMS", "Load":"Remote start/common fault/run status", "FLC A":0.0, "Cable recommendation":control_cable_desc(1.5, 8), "Basis":"Volt-free contacts or as BMS specification"},
+    ]
+    return pd.DataFrame(rows)
+
+
+def drawing_sheet_index() -> pd.DataFrame:
+    rows = [
+        {"Sheet": "E-001", "Title": "Electrical power and control schematic", "Output": "SVG + DXF + included in package", "Status": "Template generated"},
+        {"Sheet": "R-001", "Title": "Freon / refrigerant circuit schematic", "Output": "SVG + DXF + included in package", "Status": "Template generated"},
+        {"Sheet": "W-001", "Title": "Chilled water circuit schematic", "Output": "SVG + DXF + included in package", "Status": "Template generated"},
+        {"Sheet": "S-001", "Title": "Wire schedule", "Output": "CSV + Excel", "Status": "Auto generated"},
+        {"Sheet": "S-002", "Title": "Terminal schedule", "Output": "CSV + Excel", "Status": "Auto generated"},
+        {"Sheet": "S-003", "Title": "Cable schedule", "Output": "CSV + Excel", "Status": "Auto generated"},
+        {"Sheet": "S-004", "Title": "Contact cross-reference", "Output": "CSV + Excel", "Status": "Auto generated"},
+        {"Sheet": "B-001", "Title": "BOM and component selections", "Output": "CSV + Excel", "Status": "Auto generated"},
+        {"Sheet": "C-001", "Title": "Electrical standard checks", "Output": "CSV + Excel", "Status": "Preliminary checks"},
+    ]
+    return pd.DataFrame(rows)
+
+
+def svg_to_basic_dxf(svg_text: str, title: str = "SCHEMATIC") -> str:
+    """Very simple SVG-to-DXF converter for generated schematic line/rect/text content."""
+    def dxf_line(x1, y1, x2, y2, layer="0"):
+        return f"0\nLINE\n8\n{layer}\n10\n{x1}\n20\n{-y1}\n30\n0\n11\n{x2}\n21\n{-y2}\n31\n0\n"
+
+    def dxf_text(x, y, text, height=7, layer="TEXT"):
+        safe = re.sub(r"<.*?>", "", str(text)).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        safe = safe.replace("\n", " ")[:180]
+        return f"0\nTEXT\n8\n{layer}\n10\n{x}\n20\n{-y}\n30\n0\n40\n{height}\n1\n{safe}\n"
+
+    dxf = "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1009\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n"
+    dxf += dxf_text(20, 20, title, 14, "TITLE")
+
+    for m in re.finditer(r'<line[^>]*x1="([0-9.]+)"[^>]*y1="([0-9.]+)"[^>]*x2="([0-9.]+)"[^>]*y2="([0-9.]+)"', svg_text):
+        x1, y1, x2, y2 = map(float, m.groups())
+        dxf += dxf_line(x1, y1, x2, y2, "LINES")
+
+    for m in re.finditer(r'<rect[^>]*x="([0-9.]+)"[^>]*y="([0-9.]+)"[^>]*width="([0-9.]+)"[^>]*height="([0-9.]+)"', svg_text):
+        x, y, w, h = map(float, m.groups())
+        dxf += dxf_line(x, y, x+w, y, "BOX")
+        dxf += dxf_line(x+w, y, x+w, y+h, "BOX")
+        dxf += dxf_line(x+w, y+h, x, y+h, "BOX")
+        dxf += dxf_line(x, y+h, x, y, "BOX")
+
+    for m in re.finditer(r'<text[^>]*x="([0-9.]+)"[^>]*y="([0-9.]+)"[^>]*>(.*?)</text>', svg_text, flags=re.S):
+        x, y, text = m.groups()
+        dxf += dxf_text(float(x), float(y), text, 7, "TEXT")
+
+    dxf += "0\nENDSEC\n0\nEOF\n"
+    return dxf
+
+
+def make_pdf_report(project, circuits, water, fan, elec, logic, specs, elec_sel, wire_df, terminal_df, cable_df, xref_df, checks_df, refrig_ctrl_df, bom) -> bytes:
+    """Create a multi-page PDF report with schedules.
+
+    Drawings are included in the package as SVG/DXF. The PDF includes schedules and checks.
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    except Exception as exc:
+        raise RuntimeError(f"ReportLab is not installed: {exc}")
+
+    out = io.BytesIO()
+    doc = SimpleDocTemplate(out, pagesize=landscape(A4), leftMargin=24, rightMargin=24, topMargin=24, bottomMargin=24)
+    styles = getSampleStyleSheet()
+    story = []
+
+    def add_heading(txt):
+        story.append(Paragraph(txt, styles["Heading1"]))
+        story.append(Spacer(1, 8))
+
+    def add_df(title, df, max_rows=28):
+        add_heading(title)
+        if df is None or df.empty:
+            story.append(Paragraph("No data.", styles["Normal"]))
+            story.append(PageBreak())
+            return
+        display = df.head(max_rows).astype(str)
+        data = [list(display.columns)] + display.values.tolist()
+        tbl = Table(data, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+            ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 6),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ]))
+        story.append(tbl)
+        story.append(PageBreak())
+
+    add_heading(f"{project.project_name} - Preliminary Manufacturing Package")
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["Normal"]))
+    story.append(Paragraph(f"Configuration: {project.configuration}", styles["Normal"]))
+    story.append(Paragraph("This PDF contains schedules and checks. SVG and DXF drawing sheets are included separately in the downloadable ZIP package.", styles["Normal"]))
+    story.append(PageBreak())
+
+    add_df("Drawing Sheet Index", drawing_sheet_index())
+    add_df("Component Specifications", specs)
+    add_df("Electrical Selections", elec_sel)
+    add_df("Refrigeration Controls", refrig_ctrl_df)
+    add_df("Wire Schedule", wire_df)
+    add_df("Terminal Schedule", terminal_df)
+    add_df("Cable Schedule", cable_df)
+    add_df("Contact Cross-reference", xref_df)
+    add_df("Electrical Standard Checks", checks_df)
+    add_df("Bill of Material", bom)
+
+    doc.build(story)
+    return out.getvalue()
+
+
+def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def make_manufacturing_zip(esvg: str, rsvg: str, wsvg: str, xlsx: bytes, pdf_bytes: bytes, specs: pd.DataFrame, elec_sel: pd.DataFrame, wire_df: pd.DataFrame, terminal_df: pd.DataFrame, cable_df: pd.DataFrame, xref_df: pd.DataFrame, checks_df: pd.DataFrame, refrig_ctrl_df: pd.DataFrame, bom: pd.DataFrame) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("01_drawings/electrical_circuit.svg", esvg)
+        z.writestr("01_drawings/freon_circuit.svg", rsvg)
+        z.writestr("01_drawings/chilled_water_circuit.svg", wsvg)
+        z.writestr("02_dxf/electrical_circuit.dxf", svg_to_basic_dxf(esvg, "Electrical circuit"))
+        z.writestr("02_dxf/freon_circuit.dxf", svg_to_basic_dxf(rsvg, "Freon circuit"))
+        z.writestr("02_dxf/chilled_water_circuit.dxf", svg_to_basic_dxf(wsvg, "Chilled water circuit"))
+        z.writestr("03_reports/chiller_design_report.xlsx", xlsx)
+        z.writestr("03_reports/chiller_manufacturing_report.pdf", pdf_bytes)
+        z.writestr("04_schedules/component_specs.csv", df_to_csv_bytes(specs))
+        z.writestr("04_schedules/electrical_selection.csv", df_to_csv_bytes(elec_sel))
+        z.writestr("04_schedules/refrigeration_controls.csv", df_to_csv_bytes(refrig_ctrl_df))
+        z.writestr("04_schedules/wire_schedule.csv", df_to_csv_bytes(wire_df))
+        z.writestr("04_schedules/terminal_schedule.csv", df_to_csv_bytes(terminal_df))
+        z.writestr("04_schedules/cable_schedule.csv", df_to_csv_bytes(cable_df))
+        z.writestr("04_schedules/contact_cross_reference.csv", df_to_csv_bytes(xref_df))
+        z.writestr("04_schedules/electrical_checks.csv", df_to_csv_bytes(checks_df))
+        z.writestr("04_schedules/bom.csv", df_to_csv_bytes(bom))
+        z.writestr("README_MANUFACTURING_PACKAGE.txt",
+                   "Preliminary auto-generated chiller manufacturing package. Verify all drawings, part numbers, cable sizes, protection settings and code compliance before manufacture.\n")
+    return out.getvalue()
+
+
 # ---------------- SVG diagrams ----------------
 
 def esc(s: Any) -> str:
@@ -986,159 +1268,207 @@ def water_svg(project: Project, water: Water) -> str:
 
 
 
-def electrical_svg(project: Project, circuits: List[Circuit], water: Water, fan: Fan, elec: Electrical, logic: Logic) -> str:
-    """More detailed IEC-style conceptual electrical schematic as SVG.
 
-    This is a schematic-level drawing generator, not a final panel manufacturing drawing.
-    """
-    w, h = 1700, 1180
-    s = svg_start(w, h, f"{project.project_name} - IEC Style Electrical Power + Control Diagram")
-    s += '<rect x="20" y="50" width="1660" height="1090" fill="none" stroke="#111" stroke-width="1.2"/>'
-    s += '<line x1="815" y1="70" x2="815" y2="1110" stroke="#111" stroke-width="1.2" stroke-dasharray="8 6"/>'
-    s += '<text x="55" y="85" class="head">A. POWER CIRCUIT - 3 PHASE</text>'
-    s += '<text x="845" y="85" class="head">B. CONTROL CIRCUIT - LADDER</text>'
+def electrical_svg(project: Project, circuits: List[Circuit], water: Water, fan: Fan, elec: Electrical, logic: Logic) -> str:
+    """Template-based electrical schematic with generated branches, wire labels and terminal references."""
+    w, h = 1800, 1260
+    s = svg_start(w, h, f"{project.project_name} - Manufacturing Style Electrical Schematic")
+    s += '<rect x="20" y="50" width="1760" height="1170" fill="none" stroke="#111" stroke-width="1.2"/>'
+    s += '<line x1="850" y1="70" x2="850" y2="1190" stroke="#111" stroke-width="1.2" stroke-dasharray="8 6"/>'
+    s += '<text x="55" y="85" class="head">SHEET E-001A - POWER CIRCUIT</text>'
+    s += '<text x="880" y="85" class="head">SHEET E-001B - CONTROL CIRCUIT / LADDER</text>'
+
+    def wire_label(x, y, txt):
+        return f'<text x="{x}" y="{y}" class="small" fill="#003399">{esc(txt)}</text>'
+
+    def term_label(x, y, txt):
+        return f'<text x="{x}" y="{y}" class="small" fill="#990000">{esc(txt)}</text>'
 
     # ---------------- Power circuit ----------------
     px, py = 55, 120
-    s += f'<text x="{px}" y="{py}" class="txt">Supply: {esc(elec.phase)}, {elec.main_voltage_v:.0f} V, {elec.frequency_hz:.0f} Hz</text>'
+    total_a = 0.0
+    for c in circuits:
+        qty = project.number_of_compressors if project.configuration.startswith("Tandem") else 1
+        total_a += (c.compressor_flc_a if c.compressor_flc_a > 0 else flc_3ph(c.compressor_kw, elec.main_voltage_v)) * qty
+    total_a += (water.pump_flc_a if water.pump_flc_a > 0 else flc_3ph(water.pump_kw, elec.main_voltage_v)) * water.pump_qty
+    total_a += (fan.flc_a_each if fan.flc_a_each > 0 else motor_flc(fan.motor_kw_each, fan.voltage_v, fan.phase)) * fan.qty
+    q1_rating = next_std(max(1.0, total_a * 1.25), STANDARD_BREAKERS_A)
+    q1_ka = q1_breaking_capacity(elec.available_fault_ka)
+
+    s += f'<text x="{px}" y="{py}" class="txt">Supply: {esc(elec.phase)}, {elec.main_voltage_v:.0f} V, {elec.frequency_hz:.0f} Hz | Q1 {q1_rating} A, Icu >= {q1_ka} kA</text>'
     for i, lab in enumerate(["L1", "L2", "L3"]):
         x = px + 40 + i * 32
         s += f'<text x="{x}" y="{py+35}" text-anchor="middle" class="small">{lab}</text>'
         s += ln(x, py+42, x, py+120, "line")
-    s += bx(px+5, py+75, 145, 58, "Q1\nMAIN MCCB\n/ ISOLATOR")
-    s += bx(px+190, py+75, 145, 58, "PR1\nPHASE FAIL\n/ SEQUENCE" if elec.phase_relay else "PR1\nOPTIONAL")
-    s += ar(px+150, py+104, px+190, py+104)
-    s += ar(px+335, py+104, px+385, py+104)
-    s += bx(px+385, py+75, 155, 58, f"T1\nCONTROL XFMR\n{elec.control_voltage}")
-    s += f'<text x="{px+560}" y="{py+100}" class="small">T1 secondary feeds F1/Q2 control circuit.</text>'
+    s += bx(px+5, py+75, 150, 62, f"Q1\nMAIN MCCB\n{q1_rating}A {q1_ka}kA")
+    s += wire_label(px+10, py+65, "P001/P002/P003")
+    s += bx(px+195, py+75, 150, 62, "PR1\nPHASE FAIL\n/ SEQUENCE" if elec.phase_relay else "PR1\nOPTIONAL")
+    s += ar(px+155, py+106, px+195, py+106)
+    s += wire_label(px+158, py+96, "P004")
+    s += ar(px+345, py+106, px+395, py+106)
+    s += bx(px+395, py+75, 160, 62, f"T1\nCONTROL XFMR\n{elec.control_voltage}\n{elec.control_transformer_va:.0f}VA")
+    s += wire_label(px+560, py+112, "C001/C002 to F1/Q2")
 
-    bus_y = py + 190
-    s += f'<text x="{px}" y="{bus_y-22}" class="txt">3-phase distribution bus after Q1</text>'
+    bus_y = py + 200
+    s += f'<text x="{px}" y="{bus_y-25}" class="txt">3-phase distribution bus after Q1</text>'
     for off in [0, 10, 20]:
-        s += ln(px+20, bus_y+off, px+720, bus_y+off, "line")
+        s += ln(px+20, bus_y+off, px+770, bus_y+off, "line")
 
     branches = []
     comp_qty = project.number_of_compressors if project.configuration.startswith("Tandem") else len(circuits)
     for i in range(comp_qty):
         c = circuits[0] if project.configuration.startswith("Tandem") else circuits[i]
         flc = c.compressor_flc_a if c.compressor_flc_a > 0 else flc_3ph(c.compressor_kw, elec.main_voltage_v)
-        branches.append((f"COMP {i+1}", f"KM-C{i+1}", f"OL-C{i+1}", f"M-C{i+1}", f"{c.compressor_kw:.1f} kW\n{flc:.1f} A"))
-    branches.append(("CHW PUMP", "KM-P1", "OL-P1", "M-P1", f"{water.pump_kw:.1f} kW"))
+        cable = power_cable_desc(flc)
+        branches.append((f"COMP {i+1}", f"KM-C{i+1}", f"OL-C{i+1}", f"M-C{i+1}", f"{c.compressor_kw:.1f} kW\n{flc:.1f} A", f"CAB-C{i+1}", cable))
+    pump_flc = water.pump_flc_a if water.pump_flc_a > 0 else flc_3ph(water.pump_kw, elec.main_voltage_v)
+    branches.append(("CHW PUMP", "KM-P1", "OL-P1", "M-P1", f"{water.pump_kw:.1f} kW\n{pump_flc:.1f} A", "CAB-P1", power_cable_desc(pump_flc)))
+    fan_flc = fan.flc_a_each if fan.flc_a_each > 0 else motor_flc(fan.motor_kw_each, fan.voltage_v, fan.phase)
     for i in range(min(max(fan.qty, 0), 2)):
-        branches.append((f"COND FAN {i+1}", f"KM-F{i+1}", f"OL-F{i+1}", f"M-F{i+1}", f"{fan.motor_kw_each:.2f} kW"))
+        branches.append((f"COND FAN {i+1}", f"KM-F{i+1}", f"OL-F{i+1}", f"M-F{i+1}", f"{fan.motor_kw_each:.2f} kW\n{fan_flc:.1f} A", f"CAB-F{i+1}", power_cable_desc(max(0.5, fan_flc), fan.phase)))
 
     start_x = px + 20
-    spacing = 125 if len(branches) > 5 else 145
-    for idx, (name, km, ol, mt, rating) in enumerate(branches):
+    spacing = 122 if len(branches) > 5 else 145
+    for idx, (name, km, ol, mt, rating, cabtag, cabledesc) in enumerate(branches):
         x = start_x + idx * spacing
         s += ln(x+45, bus_y, x+45, bus_y+45, "wire")
-        s += bx(x, bus_y+45, 90, 42, km)
+        s += wire_label(x+52, bus_y+35, f"P{100+idx:03d}")
+        s += bx(x, bus_y+45, 92, 42, km)
         s += ln(x+45, bus_y+87, x+45, bus_y+105, "wire")
-        s += bx(x, bus_y+105, 90, 42, ol)
+        s += bx(x, bus_y+105, 92, 42, ol)
         s += ln(x+45, bus_y+147, x+45, bus_y+165, "wire")
-        s += bx(x, bus_y+165, 90, 62, f"{mt}\n{name}\n{rating}")
-        s += ln(x+45, bus_y+227, x+45, bus_y+242, "wire")
-        s += f'<path d="M{x+35} {bus_y+242} L{x+55} {bus_y+242} M{x+38} {bus_y+247} L{x+52} {bus_y+247} M{x+41} {bus_y+252} L{x+49} {bus_y+252}" stroke="#111" stroke-width="1.2"/>'
-    if fan.qty > 2:
-        s += f'<text x="{px+520}" y="{bus_y+280}" class="small">Additional condenser fan branches M-F3...M-F{fan.qty} are repeated similarly.</text>'
+        s += wire_label(x+52, bus_y+160, cabtag)
+        s += bx(x, bus_y+165, 92, 68, f"{mt}\n{name}\n{rating}")
+        s += f'<text x="{x+46}" y="{bus_y+248}" text-anchor="middle" class="small">{esc(cabledesc)}</text>'
+        s += term_label(x+8, bus_y+262, f"XT-P{idx+1}: U/V/W/PE")
+        s += ln(x+45, bus_y+233, x+45, bus_y+246, "wire")
+        s += f'<path d="M{x+35} {bus_y+246} L{x+55} {bus_y+246} M{x+38} {bus_y+251} L{x+52} {bus_y+251} M{x+41} {bus_y+256} L{x+49} {bus_y+256}" stroke="#111" stroke-width="1.2"/>'
 
-    s += bx(px, 560, 720, 95, "POWER NOTES\nQ1 main MCCB/isolator. KM = motor contactor. OL = overload relay.\nPR1 healthy contact is used in compressor safety chain.\nEach motor requires earthing, overload setting, cable sizing and short-circuit protection.")
+    if fan.qty > 2:
+        s += f'<text x="{px+520}" y="{bus_y+300}" class="small">Additional fan feeders M-F3...M-F{fan.qty} auto-listed in cable/BOM schedules.</text>'
+
+    s += bx(px, 620, 755, 120, "POWER NOTES\nBranch generation is based on selected compressors, pump and condenser fan quantity.\nBlue labels = generated wire/cable numbers. Red labels = generated terminal references.\nCable sizes are preliminary and must be checked for installation method, ambient, grouping and voltage drop.\nQ1 breaking capacity is based on available fault level input.")
 
     # ---------------- Control circuit ----------------
-    cx, cy = 845, 120
-    x_raw, x_lc, x_n = cx + 10, cx + 95, 1640
+    cx, cy = 880, 120
+    x_raw, x_lc, x_n = cx + 10, cx + 95, 1730
     s += f'<text x="{x_raw}" y="{cy}" text-anchor="middle" class="head">L</text>'
     s += f'<text x="{x_lc}" y="{cy}" text-anchor="middle" class="head">LC</text>'
     s += f'<text x="{x_n}" y="{cy}" text-anchor="middle" class="head">N</text>'
     s += f'<text x="{x_raw-5}" y="{cy+18}" class="small">raw live</text>'
     s += f'<text x="{x_lc-12}" y="{cy+18}" class="small">controlled live</text>'
     s += f'<text x="{x_n-15}" y="{cy+18}" class="small">neutral</text>'
-
-    s += ln(x_raw, cy+35, x_raw, cy+125, "line")
-    s += ln(x_lc, cy+155, x_lc, 1065, "line")
-    s += ln(x_n, cy+35, x_n, 1065, "line")
+    s += ln(x_raw, cy+35, x_raw, cy+128, "line")
+    s += ln(x_lc, cy+160, x_lc, 1110, "line")
+    s += ln(x_n, cy+35, x_n, 1110, "line")
 
     y = cy + 65
-    s += f'<text x="{cx}" y="{y-26}" class="txt">Master control / control power ON</text>'
+    s += f'<text x="{cx}" y="{y-27}" class="txt">Master control / control power ON</text>'
     s += ln(x_raw, y, x_raw+35, y, "wire")
     items = [
-        ("F1\nFuse", x_raw+75),
-        ("Q2\nMCB", x_raw+160),
-        ("E-STOP\nNC", x_raw+250),
-        ("S0 STOP\nNC", x_raw+350),
-        ("S2 ON\nNO", x_raw+450),
-        ("K0 COIL\nMASTER", x_raw+565),
+        ("F1\nFuse", x_raw+75, "100"),
+        ("Q2\nMCB", x_raw+160, "101"),
+        ("E-STOP\nNC", x_raw+250, "102"),
+        ("S0 STOP\nNC", x_raw+350, "103"),
+        ("S2 ON\nNO", x_raw+450, "104"),
+        ("K0 COIL\nMASTER", x_raw+565, "105"),
     ]
     last_right = x_raw+35
-    for label, x in items:
+    for label, x, wno in items:
         s += bx(x-38, y-22, 76, 44, label)
         if last_right < x-38:
             s += ln(last_right, y, x-38, y, "wire")
+        s += wire_label(x-25, y-28, wno)
         last_right = x+38
     s += ln(last_right, y, x_n, y, "wire")
+    s += wire_label(x_n-55, y-8, "N200")
     s += bx(x_raw+410, y+45, 95, 36, "K0 NO\nseal-in", "dash")
     s += f'<path d="M{x_raw+410} {y} L{x_raw+410} {y+63}" class="wire"/>'
     s += f'<path d="M{x_raw+505} {y+63} L{x_raw+505} {y}" class="wire"/>'
     s += bx(x_raw+650, y+38, 70, 38, "H0\nCTRL ON")
     s += ln(x_raw+720, y+57, x_n, y+57, "wire")
+    s += term_label(x_raw+240, y+70, "TB1-01/02 remote stop optional")
 
     y = cy + 165
     s += ln(x_raw, y, x_raw+30, y, "wire")
     s += bx(x_raw+30, y-22, 80, 44, "K0 NO\nMASTER")
     s += ln(x_raw+110, y, x_lc, y, "wire")
-    s += f'<text x="{x_lc+15}" y="{y-12}" class="small">LC is live only after F1 + Q2 + E-stop + STOP + K0.</text>'
+    s += wire_label(x_raw+130, y-8, "110")
+    s += f'<text x="{x_lc+15}" y="{y-12}" class="small">LC bus is live only after F1 + Q2 + E-stop + STOP + K0.</text>'
 
-    def ctrl_rung(ypos: int, label: str, contacts: List[str], coil: str, lamp: str = ""):
+    def ctrl_rung(ypos: int, label: str, contacts: List[Tuple[str, str, str]], coil: str, lamp: str = "", terminal: str = ""):
         out = f'<text x="{cx}" y="{ypos-24}" class="small">{esc(label)}</text>'
         out += ln(x_lc, ypos, x_lc+35, ypos, "wire")
         x = x_lc + 80
-        for con in contacts:
+        for con, wno, tref in contacts:
             out += bx(x-38, ypos-20, 76, 40, con)
             out += ln(x+38, ypos, x+52, ypos, "wire")
+            out += wire_label(x-28, ypos-25, wno)
+            if tref:
+                out += term_label(x-35, ypos+34, tref)
             x += 92
         out += bx(x, ypos-24, 92, 48, coil)
         out += ln(x+92, ypos, x_n, ypos, "wire")
+        if terminal:
+            out += term_label(x-6, ypos+38, terminal)
         if lamp:
             out += bx(x+120, ypos+28, 64, 34, lamp)
         return out
 
-    s += ctrl_rung(cy+240, "Rung 1 - chilled water pump", ["SA1\nAUTO/MAN", "OL-P\nNC", f"TD2\nOFF {logic.pump_off_delay_s}s"], "KM-P\nPUMP", "H2 RUN")
-    s += ctrl_rung(cy+315, "Rung 2 - cooling demand / liquid line solenoid", ["TC1\nCOOL", "K0\nNO"], "YV1\nLIQ SV", "H5 OPEN")
+    s += ctrl_rung(cy+245, "Rung 1 - chilled water pump", [("SA1\nAUTO/MAN","120",""),("OL-P\nNC","121",""),(f"TD2\nOFF {logic.pump_off_delay_s}s","122","")], "KM-P\nPUMP", "H2 RUN", "A1/A2")
+    s += ctrl_rung(cy+325, "Rung 2 - cooling demand / YV1", [("TC1\nCOOL","130",""),("K0\nNO","131","")], "YV1\nLIQ SV", "H5 OPEN", "TB1-21/22")
 
-    y1 = cy + 390
+    y1 = cy + 405
     s += f'<text x="{cx}" y="{y1-24}" class="small">Rung 3 - compressor safety chain</text>'
     s += ln(x_lc, y1, x_lc+35, y1, "wire")
     x = x_lc + 75
-    comp_contacts = ["KM-P\nNO", f"TD1\n{logic.pump_start_delay_s}s", "FS1\nFLOW", "HPS\nNC", "LPS\nNC", "FRZ1\nNC", "PR1\nOK", "OL-C\nNC", f"AST\n{logic.anti_short_cycle_s}s"]
-    for idx, con in enumerate(comp_contacts):
+    comp_contacts = [
+        ("KM-P\nNO","300",""),
+        (f"TD1\n{logic.pump_start_delay_s}s","301",""),
+        ("FS1\nFLOW","302","TB1-03/04"),
+        ("HPS\nNC","303","TB1-05/06"),
+        ("LPS\nNC","304","TB1-07/08"),
+        ("FRZ1\nNC","305","TB1-09/10"),
+        ("PR1\nOK","306",""),
+        ("OL-C\nNC","307",""),
+        (f"AST\n{logic.anti_short_cycle_s}s","308",""),
+    ]
+    for idx, (con, wno, tref) in enumerate(comp_contacts):
         if idx == 5:
-            s += ln(x, y1, x, y1+55, "wire")
-            y_work = y1 + 55
+            s += ln(x, y1, x, y1+58, "wire")
+            y_work = y1 + 58
             s += ln(x_lc, y_work, x_lc+35, y_work, "wire")
             x = x_lc + 75
         else:
-            y_work = y1 if idx < 5 else y1 + 55
+            y_work = y1 if idx < 5 else y1 + 58
         s += bx(x-36, y_work-19, 72, 38, con)
         s += ln(x+36, y_work, x+48, y_work, "wire")
+        s += wire_label(x-25, y_work-24, wno)
+        if tref:
+            s += term_label(x-37, y_work+33, tref)
         x += 86
-    s += bx(x, y1+55-24, 92, 48, "KM-C\nCOMP")
-    s += ln(x+92, y1+55, x_n, y1+55, "wire")
-    s += bx(x+120, y1+83, 72, 34, "H3 RUN")
+    s += bx(x, y1+58-24, 92, 48, "KM-C\nCOMP")
+    s += ln(x+92, y1+58, x_n, y1+58, "wire")
+    s += bx(x+120, y1+86, 72, 34, "H3 RUN")
+    s += term_label(x-4, y1+98, "A1/A2")
 
-    s += ctrl_rung(cy+525, "Rung 4 - condenser fan 1", ["SA2\nAUTO", "KM-C\nNO", "OL-F1\nNC", "CPS1\nNO"], "KM-F1\nFAN1", "H6 RUN")
-    s += ctrl_rung(cy+600, "Rung 5 - condenser fan 2", ["SA2\nAUTO", "KM-C\nNO", "OL-F2\nNC", "CPS2\nNO"], "KM-F2\nFAN2", "H7 RUN")
-    s += ctrl_rung(cy+675, "Rung 6 - crankcase heater", ["KM-C\nNC"], "HTR1\nCCH", "H4 ON")
+    s += ctrl_rung(cy+555, "Rung 4 - condenser fan 1", [("SA2\nAUTO","500",""),("KM-C\nNO","501",""),("OL-F1\nNC","502",""),("CPS1\nNO","503","TB1-11/12")], "KM-F1\nFAN1", "H6 RUN", "A1/A2")
+    s += ctrl_rung(cy+635, "Rung 5 - condenser fan 2", [("SA2\nAUTO","510",""),("KM-C\nNO","511",""),("OL-F2\nNC","512",""),("CPS2\nNO","513","TB1-13/14")], "KM-F2\nFAN2", "H7 RUN", "A1/A2")
+    s += ctrl_rung(cy+715, "Rung 6 - crankcase heater", [("KM-C\nNC","600","")], "HTR1\nCCH", "H4 ON", "HTR1")
 
-    s += f'<text x="{cx}" y="{cy+760}" class="small">Rung 7 - fault indication contacts use separate alarm auxiliaries</text>'
-    fault_labels = [("HPS\nTRIP", "H8"), ("LPS\nTRIP", "H9"), ("FS1\nFAIL", "H10"), ("OL-C\nTRIP", "H11"), ("OL-P\nTRIP", "H12")]
-    fx, fy = x_lc + 60, cy + 785
-    for lab, lamp in fault_labels:
+    s += f'<text x="{cx}" y="{cy+805}" class="small">Rung 7 - fault indication / BMS terminals</text>'
+    fault_labels = [("HPS\nTRIP", "H8", "TB1-31/32"), ("LPS\nTRIP", "H9", "TB1-33/34"), ("FS1\nFAIL", "H10", "TB1-35/36"), ("OL-C\nTRIP", "H11", ""), ("OL-P\nTRIP", "H12", "")]
+    fx, fy = x_lc + 60, cy + 832
+    for idx, (lab, lamp, term) in enumerate(fault_labels):
         s += bx(fx-38, fy-20, 76, 40, lab)
         s += bx(fx-28, fy+32, 56, 32, lamp)
-        fx += 110
+        s += wire_label(fx-25, fy-26, f"6{idx}0")
+        if term:
+            s += term_label(fx-42, fy+78, term)
+        fx += 116
 
-    s += bx(cx, 990, 785, 95, "CONTROL NOTES\nL raw feeds only the master control rung. K0 master contact creates LC controlled live bus.\nAll pump, YV1, compressor, fan, heater and fault rungs start from LC and return to N.\nFor production add terminal numbers, wire numbers, cable sizes, exact part numbers and safety standard review.")
-    s += bx(55, 690, 720, 150, "SYMBOL / TAG LEGEND\nQ = breaker/isolator | F = fuse | T = transformer | K0 = master relay | KM = contactor | OL = overload\nHPS = high-pressure switch | LPS = low-pressure switch | CPS = condenser fan pressure switch\nFS = flow switch | FRZ = freeze thermostat | AST/TD = timer | YV = solenoid valve | H = lamp | HTR/CCH = crankcase heater")
+    s += bx(cx, 1035, 830, 105, "CONTROL NOTES\nBlue labels are generated wire numbers. Red labels are generated terminal references.\nL raw feeds only the master control rung. K0 master contact creates LC controlled live bus.\nAll pump, YV1, compressor, fan, heater and fault rungs start from LC and return to N.\nFinal panel drawings must verify wire markers, terminal strip layout, cable routing and protection coordination.")
+    s += bx(55, 780, 760, 165, "SYMBOL / TAG LEGEND\nQ = breaker/isolator | F = fuse | T = transformer | K0 = master relay | KM = contactor | OL = overload\nHPS = high-pressure switch | LPS = low-pressure switch | CPS = condenser fan pressure switch\nFS = flow switch | FRZ = freeze thermostat | AST/TD = timer | YV = solenoid valve | H = lamp | HTR/CCH = crankcase heater\nPxxx = power wire/cable reference | 100/300/500 series = control wire number | TB1-xx = field terminal")
     s += "</svg>"
     return s
 
@@ -1340,7 +1670,8 @@ def logic_form(project: Project) -> Logic:
 
 
 
-def excel_report(project, circuits, water, fan, elec, logic, ps_dfs, specs, elec_sel, wire_df, terminal_df, xref_df, checks_df, bom) -> bytes:
+
+def excel_report(project, circuits, water, fan, elec, logic, ps_dfs, specs, elec_sel, wire_df, terminal_df, cable_df, xref_df, checks_df, refrig_ctrl_df, bom) -> bytes:
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         rows=[]
@@ -1348,20 +1679,22 @@ def excel_report(project, circuits, water, fan, elec, logic, ps_dfs, specs, elec
             rows += [{"Section":section,"Input":k,"Value":v} for k,v in asdict(obj).items()]
         for c in circuits:
             rows += [{"Section":c.name,"Input":k,"Value":v} for k,v in asdict(c).items()]
+        drawing_sheet_index().to_excel(writer, sheet_name="Sheet Index", index=False)
         pd.DataFrame(rows).to_excel(writer, sheet_name="Inputs",index=False)
-        if ps_dfs:
-            pd.concat(ps_dfs,ignore_index=True).to_excel(writer, sheet_name="Pressure Settings",index=False)
+        if ps_dfs: pd.concat(ps_dfs,ignore_index=True).to_excel(writer, sheet_name="Pressure Settings",index=False)
         specs.to_excel(writer, sheet_name="Component Specs",index=False)
         elec_sel.to_excel(writer, sheet_name="Electrical Selection",index=False)
+        refrig_ctrl_df.to_excel(writer, sheet_name="Refrig Controls", index=False)
         wire_df.to_excel(writer, sheet_name="Wire Schedule",index=False)
         terminal_df.to_excel(writer, sheet_name="Terminal Schedule",index=False)
+        cable_df.to_excel(writer, sheet_name="Cable Schedule",index=False)
         xref_df.to_excel(writer, sheet_name="Contact Xref",index=False)
         checks_df.to_excel(writer, sheet_name="Electrical Checks",index=False)
         bom.to_excel(writer, sheet_name="BOM",index=False)
         pd.DataFrame([
-            {"Note":"All part numbers are preliminary candidate selections and must be verified against the final manufacturer catalogue and project standard."},
-            {"Note":"Cable sizes are approximate engineering recommendations only. Final cable sizing must consider installation method, ambient temperature, derating, grouping, voltage drop and local code."},
-            {"Note":"Wire numbers and terminal numbers are generated schedules. Final panel manufacturing drawings must still show complete wire markers, terminal plans and cross-references."},
+            {"Note":"Preliminary app output only. Verify all component selections, wiring, pressure settings and code compliance before manufacturing."},
+            {"Note":"Part numbers are candidate catalogue families. Confirm exact part number, coil voltage, auxiliary contacts, pressure range, reset type and local availability."},
+            {"Note":"Cable sizes are preliminary. Final sizing must check installation method, ambient derating, grouping, voltage drop and short-circuit withstand."},
         ]).to_excel(writer, sheet_name="Notes",index=False)
     return out.getvalue()
 
@@ -1511,11 +1844,16 @@ def main():
         st.markdown("---")
         specs = component_specs(project,circuits,water,fan,elec,logic)
         elec_sel = electrical_selection(project,circuits,water,fan,elec)
+        refrig_ctrl_df = refrigeration_controls_selection(circuits, pressure_unit)
         wire_df = wire_schedule(project,circuits,water,fan,elec,logic)
         terminal_df = terminal_schedule(project,circuits,water,fan,elec,logic)
+        cable_df = cable_schedule(project,circuits,water,fan,elec)
         xref_df = contact_cross_reference(project,circuits,water,fan,elec,logic)
         checks_df = electrical_standard_checks(project,circuits,water,fan,elec,logic)
         bom = bom_from(specs,elec_sel)
+
+        st.subheader("Drawing sheet index")
+        st.dataframe(drawing_sheet_index(),width="stretch",hide_index=True)
 
         st.subheader("Component specifications")
         st.dataframe(specs,width="stretch",hide_index=True)
@@ -1523,11 +1861,17 @@ def main():
         st.subheader("Electrical selections with candidate part numbers and cable recommendations")
         st.dataframe(elec_sel,width="stretch",hide_index=True)
 
+        st.subheader("Refrigeration controls with candidate part numbers")
+        st.dataframe(refrig_ctrl_df,width="stretch",hide_index=True)
+
         st.subheader("Wire schedule")
         st.dataframe(wire_df,width="stretch",hide_index=True)
 
         st.subheader("Terminal schedule")
         st.dataframe(terminal_df,width="stretch",hide_index=True)
+
+        st.subheader("Cable schedule")
+        st.dataframe(cable_df,width="stretch",hide_index=True)
 
         st.subheader("Contact cross-reference")
         st.dataframe(xref_df,width="stretch",hide_index=True)
@@ -1561,13 +1905,27 @@ HPS / flow fail / freeze / overload / phase fault opens → compressor stops imm
                 language="text"
             )
 
-        xlsx = excel_report(project,circuits,water,fan,elec,logic,ps_dfs,specs,elec_sel,wire_df,terminal_df,xref_df,checks_df,bom)
+        xlsx = excel_report(project,circuits,water,fan,elec,logic,ps_dfs,specs,elec_sel,wire_df,terminal_df,cable_df,xref_df,checks_df,refrig_ctrl_df,bom)
+        try:
+            pdf_report = make_pdf_report(project,circuits,water,fan,elec,logic,specs,elec_sel,wire_df,terminal_df,cable_df,xref_df,checks_df,refrig_ctrl_df,bom)
+        except Exception as exc:
+            pdf_report = b""
+            st.warning(f"PDF report could not be generated. Install reportlab if needed. Details: {exc}")
+
         st.download_button("Download Excel report", xlsx, "chiller_design_report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        if pdf_report:
+            st.download_button("Download multi-sheet PDF report", pdf_report, "chiller_manufacturing_report.pdf", "application/pdf")
         st.download_button("Download electrical SVG", esvg, "electrical_circuit.svg", "image/svg+xml")
         st.download_button("Download Freon SVG", rsvg, "freon_circuit.svg", "image/svg+xml")
         st.download_button("Download chilled-water SVG", wsvg, "chilled_water_circuit.svg", "image/svg+xml")
+        st.download_button("Download electrical DXF", svg_to_basic_dxf(esvg, "Electrical circuit"), "electrical_circuit.dxf", "application/dxf")
+        st.download_button("Download Freon DXF", svg_to_basic_dxf(rsvg, "Freon circuit"), "freon_circuit.dxf", "application/dxf")
+        st.download_button("Download chilled-water DXF", svg_to_basic_dxf(wsvg, "Chilled water circuit"), "chilled_water_circuit.dxf", "application/dxf")
+        if pdf_report:
+            package_zip = make_manufacturing_zip(esvg,rsvg,wsvg,xlsx,pdf_report,specs,elec_sel,wire_df,terminal_df,cable_df,xref_df,checks_df,refrig_ctrl_df,bom)
+            st.download_button("Download complete manufacturing package ZIP", package_zip, "chiller_manufacturing_package.zip", "application/zip")
 
-        st.warning("Part numbers are preliminary candidate selections only. Final wiring drawings still need wire numbers on the actual schematic, terminal plans, cable routing, short-circuit coordination, and project-specific code compliance.")
+        st.warning("Part numbers and cable sizes are preliminary candidate selections only. Final manufacturing drawings must be checked and approved by a qualified electrical engineer.")
 
 if __name__ == "__main__":
     main()
