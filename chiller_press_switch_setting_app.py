@@ -1021,7 +1021,7 @@ def electrical_svg(project: Project, circuits: List[Circuit], water: Water, fan:
     comp_qty = project.number_of_compressors if project.configuration.startswith("Tandem") else len(circuits)
     for i in range(comp_qty):
         c = circuits[0] if project.configuration.startswith("Tandem") else circuits[i]
-        flc = c.compressor_flc_a if c.compressor_flc_a > 0 else est_3ph_flc(c.compressor_kw, elec.main_voltage_v)
+        flc = c.compressor_flc_a if c.compressor_flc_a > 0 else flc_3ph(c.compressor_kw, elec.main_voltage_v)
         branches.append((f"COMP {i+1}", f"KM-C{i+1}", f"OL-C{i+1}", f"M-C{i+1}", f"{c.compressor_kw:.1f} kW\n{flc:.1f} A"))
     branches.append(("CHW PUMP", "KM-P1", "OL-P1", "M-P1", f"{water.pump_kw:.1f} kW"))
     for i in range(min(max(fan.qty, 0), 2)):
@@ -1144,7 +1144,11 @@ def electrical_svg(project: Project, circuits: List[Circuit], water: Water, fan:
 
 
 def show_svg(svg: str, height: int=650):
-    components.html(f'<div style="width:100%; overflow:auto; border:1px solid #ddd; padding:8px">{svg}</div>', height=height)
+    html = f'<div style="width:100%; overflow:auto; border:1px solid #ddd; padding:8px">{svg}</div>'
+    if hasattr(st, "html"):
+        st.html(html)
+    else:
+        components.html(html, height=height)
 
 
 def svg_link(svg: str, filename: str, label: str) -> str:
