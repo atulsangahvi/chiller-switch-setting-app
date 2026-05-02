@@ -483,14 +483,40 @@ def electrical_selection(project: Project, circuits: List[Circuit], water: Water
 
 
 def bom_from(specs: pd.DataFrame, elec_sel: pd.DataFrame) -> pd.DataFrame:
-    a = specs[["System", "Tag", "Component", "Qty", "Specification", "Remarks"]].copy()
-    b = pd.DataFrame([{"System":"Electrical", "Tag":r.Tag, "Component":r.Item, "Qty":r.Qty, "Specification":r._asdict().get("_4", r["Preliminary selection"]), "Remarks":r.Notes} for r in elec_sel.itertuples(index=False)]) if not elec_sel.empty else pd.DataFrame()
-    # Easier and safer build because itertuples mangles names with spaces.
-    erows = []
-    for _, r in elec_sel.iterrows():
-        erows.append({"System":"Electrical", "Tag":r["Tag"], "Component":r["Item"], "Qty":r["Qty"], "Specification":r["Preliminary selection"], "Remarks":r["Notes"]})
-    b = pd.DataFrame(erows)
-    return pd.concat([a, b], ignore_index=True)
+    """Build BOM from component specs and electrical selection tables.
+
+    This avoids itertuples because columns such as "Preliminary selection"
+    are renamed/mangled in namedtuples and can cause tuple indexing errors.
+    """
+    cols = ["System", "Tag", "Component", "Qty", "Specification", "Remarks"]
+    frames = []
+
+    if specs is not None and not specs.empty:
+        s = specs.copy()
+        for col in cols:
+            if col not in s.columns:
+                s[col] = ""
+        frames.append(s[cols])
+
+    if elec_sel is not None and not elec_sel.empty:
+        e = elec_sel.copy()
+        e["System"] = "Electrical"
+        e = e.rename(
+            columns={
+                "Item": "Component",
+                "Preliminary selection": "Specification",
+                "Notes": "Remarks",
+            }
+        )
+        for col in cols:
+            if col not in e.columns:
+                e[col] = ""
+        frames.append(e[cols])
+
+    if not frames:
+        return pd.DataFrame(columns=cols)
+
+    return pd.concat(frames, ignore_index=True)
 
 
 # ---------------- SVG diagrams ----------------
@@ -860,7 +886,7 @@ def main():
                 parsed = parse_compressor_pdf(text)
                 st.success(f"Candidate fields found: {len(parsed)}. Please verify before using.")
                 required = [("compressor_make","Make"),("compressor_model","Model"),("approved_refrigerants","Approved refrigerants"),("max_high_pressure_barg","Max high-side pressure"),("max_condensing_temp_c","Max condensing temp"),("min_evaporating_temp_c","Min evaporating temp"),("compressor_flc_a","FLC/RLA"),("compressor_lra_a","LRA")]
-                st.dataframe(pd.DataFrame([{"Data":lab,"Status":"Found - verify" if k in parsed else "Missing","Value":parsed.get(k,"")} for k,lab in required]),use_container_width=True,hide_index=True)
+                st.dataframe(pd.DataFrame([{"Data":lab,"Status":"Found - verify" if k in parsed else "Missing","Value":parsed.get(k,"")} for k,lab in required]),width="stretch",hide_index=True)
                 with st.expander("Extracted text"):
                     st.text_area("Text", text[:30000], height=250)
     with tabs[2]:
@@ -894,7 +920,7 @@ def main():
                 m2.metric("Normal condensing",ptxt(vals["normal_condensing"],pressure_unit))
                 m3.metric("Subcooled liquid reference",ptxt(vals["subcooled_liquid"],pressure_unit))
             if not df.empty:
-                ps_dfs.append(df); st.dataframe(df,use_container_width=True,hide_index=True)
+                ps_dfs.append(df); st.dataframe(df,width="stretch",hide_index=True)
         st.markdown("---")
         st.subheader("Diagrams")
         esvg = electrical_svg(project,circuits,water,fan,elec,logic)
@@ -908,9 +934,9 @@ def main():
         specs = component_specs(project,circuits,water,fan,elec,logic)
         elec_sel = electrical_selection(project,circuits,water,fan,elec)
         bom = bom_from(specs,elec_sel)
-        st.subheader("Component specifications"); st.dataframe(specs,use_container_width=True,hide_index=True)
-        st.subheader("Electrical selections"); st.dataframe(elec_sel,use_container_width=True,hide_index=True)
-        st.subheader("Bill of material"); st.dataframe(bom,use_container_width=True,hide_index=True)
+        st.subheader("Component specifications"); st.dataframe(specs,width="stretch",hide_index=True)
+        st.subheader("Electrical selections"); st.dataframe(elec_sel,width="stretch",hide_index=True)
+        st.subheader("Bill of material"); st.dataframe(bom,width="stretch",hide_index=True)
         st.subheader("Sequence logic")
         if project.configuration.startswith("Tandem"):
             st.code(f"""TANDEM COMMON CIRCUIT\nControl ON → pump → flow proven → TC1 stage 1 → common YV1 opens → LPS closes → lead compressor starts.\nIf load remains high by {logic.stage2_on_offset_k:.1f} K after {logic.lag_start_delay_s}s, lag compressor starts.\nOn unloading, lag compressor stops first. Lead stops by pump-down when TC1 is satisfied.\nCommon HPS/LPS/FS/FRZ/PR trips stop both compressors. Individual overload trips stop the affected compressor.""", language="text")
