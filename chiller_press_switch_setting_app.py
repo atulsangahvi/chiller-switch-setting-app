@@ -18,7 +18,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-APP_VERSION = "v8-reference-style-diagram"
+APP_VERSION = "v9-clean-reference-diagram"
 
 try:
     from CoolProp.CoolProp import PropsSI
@@ -1270,343 +1270,327 @@ def water_svg(project: Project, water: Water) -> str:
 
 
 
+
 def electrical_svg(project: Project, circuits: List[Circuit], water: Water, fan: Fan, elec: Electrical, logic: Logic) -> str:
-    """Reference-style one-page electrical schematic.
+    """Clean reference-style electrical diagram.
 
-    This layout intentionally follows the user's uploaded example:
-    left = power circuit, right = ladder control circuit, bottom = legend/notes.
-    It still includes generated wire numbers, terminal references, ratings and cable references.
+    This version deliberately follows the uploaded reference:
+    - left: power circuit
+    - right: ladder control circuit
+    - bottom: legend and notes
+    Wire/terminal/cable details remain in generated schedules and are lightly referenced on the drawing.
     """
-    w, h = 1600, 1050
+    w, h = 1700, 1100
 
-    def text(x, y, content, cls="txt", anchor="start", color="#111"):
-        return f'<text x="{x}" y="{y}" text-anchor="{anchor}" class="{cls}" fill="{color}">{esc(str(content))}</text>'
+    def mtext(x, y, content, cls="small", anchor="middle", color="#111", gap=13):
+        lines = str(content).split("\n")
+        out = ""
+        for i, line in enumerate(lines):
+            out += f'<text x="{x}" y="{y + i*gap}" text-anchor="{anchor}" class="{cls}" fill="{color}">{esc(line)}</text>'
+        return out
 
-    def wire_no(x, y, content):
-        return text(x, y, content, "small", "start", "#003399")
-
-    def term_no(x, y, content):
-        return text(x, y, content, "small", "start", "#990000")
-
-    def circle(cx, cy, r, extra=""):
-        return f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="white" stroke="#111" stroke-width="1.5" {extra}/>'
+    def tagtext(x, y, content, color="#003399", anchor="start"):
+        return mtext(x, y, content, "small", anchor, color, 11)
 
     def contact_no(x, y, label="", wno=""):
-        # Normally open contact in ladder
-        out = ln(x, y, x+18, y, "wire")
-        out += ln(x+18, y-9, x+18, y+9, "wire")
+        out = ln(x, y, x+16, y, "wire")
+        out += ln(x+16, y-9, x+16, y+9, "wire")
         out += ln(x+34, y-9, x+34, y+9, "wire")
-        out += ln(x+34, y, x+52, y, "wire")
+        out += ln(x+34, y, x+50, y, "wire")
         if label:
-            out += text(x+26, y-15, label, "small", "middle")
+            out += mtext(x+25, y-25, label, "small")
         if wno:
-            out += wire_no(x+18, y+23, wno)
+            out += tagtext(x+18, y+22, wno)
         return out
 
     def contact_nc(x, y, label="", wno=""):
-        # Normally closed contact in ladder
-        out = ln(x, y, x+18, y, "wire")
-        out += ln(x+18, y-9, x+18, y+9, "wire")
+        out = ln(x, y, x+16, y, "wire")
+        out += ln(x+16, y-9, x+16, y+9, "wire")
         out += ln(x+34, y-9, x+34, y+9, "wire")
-        out += ln(x+18, y+9, x+34, y-9, "wire")
-        out += ln(x+34, y, x+52, y, "wire")
+        out += ln(x+16, y+9, x+34, y-9, "wire")
+        out += ln(x+34, y, x+50, y, "wire")
         if label:
-            out += text(x+26, y-15, label, "small", "middle")
+            out += mtext(x+25, y-25, label, "small")
         if wno:
-            out += wire_no(x+18, y+23, wno)
+            out += tagtext(x+18, y+22, wno)
         return out
 
-    def coil(x, y, label, w=72):
-        out = f'<rect x="{x}" y="{y-16}" width="{w}" height="32" fill="white" stroke="#111" stroke-width="1.5" rx="16" ry="16"/>'
-        out += text(x+w/2, y+4, label, "small", "middle")
+    def coil(x, y, label, width=72):
+        out = f'<rect x="{x}" y="{y-16}" width="{width}" height="32" fill="white" stroke="#111" stroke-width="1.5" rx="16" ry="16"/>'
+        out += mtext(x+width/2, y-3, label, "small", "middle", "#111", 12)
         return out
 
     def lamp(x, y, label):
-        out = circle(x, y, 14)
+        out = f'<circle cx="{x}" cy="{y}" r="15" fill="white" stroke="#111" stroke-width="1.5"/>'
         out += ln(x-9, y-9, x+9, y+9, "wire")
         out += ln(x+9, y-9, x-9, y+9, "wire")
-        out += text(x, y-20, label, "small", "middle")
+        out += mtext(x, y-23, label, "small")
         return out
 
-    def three_pole_switch(x, y, tag, label):
-        # three vertical phase lines with open slanted contacts
-        out = text(x+34, y-22, tag, "small", "middle")
-        out += text(x+34, y-8, label, "small", "middle")
+    def small_box(x, y, ww, hh, label, cls="box"):
+        return bx(x, y, ww, hh, label, cls)
+
+    def three_pole_device(x, y, tag, label, rating=""):
+        out = mtext(x+34, y-33, tag, "small")
+        out += mtext(x+34, y-19, label, "small")
+        if rating:
+            out += mtext(x+34, y+68, rating, "small", "middle", "#003399")
         for i in range(3):
             xx = x + i*34
-            out += ln(xx, y, xx, y+22, "wire")
-            out += circle(xx, y+24, 3)
-            out += ln(xx-7, y+31, xx+8, y+42, "wire")
-            out += circle(xx, y+48, 3)
-            out += ln(xx, y+50, xx, y+70, "wire")
+            out += ln(xx, y, xx, y+16, "wire")
+            out += f'<circle cx="{xx}" cy="{y+18}" r="3" fill="white" stroke="#111" stroke-width="1.2"/>'
+            out += ln(xx-8, y+26, xx+8, y+38, "wire")
+            out += f'<circle cx="{xx}" cy="{y+44}" r="3" fill="white" stroke="#111" stroke-width="1.2"/>'
+            out += ln(xx, y+46, xx, y+62, "wire")
         return out
 
-    def overload3(x, y, tag, label, setting=""):
-        out = text(x+34, y-8, tag, "small", "middle")
-        out += f'<rect x="{x-12}" y="{y}" width="92" height="44" fill="white" stroke="#111" stroke-width="1.3"/>'
+    def overload_block(x, y, tag, label, setting=""):
+        out = mtext(x+34, y-10, tag, "small")
+        out += f'<rect x="{x-12}" y="{y}" width="92" height="46" fill="white" stroke="#111" stroke-width="1.4"/>'
         for i in range(3):
             xx = x + i*34
             out += ln(xx, y-18, xx, y, "wire")
-            out += f'<rect x="{xx-8}" y="{y+9}" width="16" height="16" fill="white" stroke="#111" stroke-width="1"/>'
-            out += ln(xx, y+44, xx, y+62, "wire")
-        out += text(x+34, y+59, label, "small", "middle")
+            out += f'<rect x="{xx-8}" y="{y+10}" width="16" height="16" fill="white" stroke="#111" stroke-width="1"/>'
+            out += ln(xx, y+46, xx, y+64, "wire")
+        out += mtext(x+34, y+62, label, "small")
         if setting:
-            out += text(x+34, y+74, setting, "small", "middle")
+            out += mtext(x+34, y+88, setting, "small", "middle", "#003399")
         return out
 
-    def motor3(x, y, tag, label, rating, cable, terminal):
-        out = circle(x, y, 28)
-        out += text(x, y-2, "M", "head", "middle")
-        out += text(x, y+13, "3~", "small", "middle")
-        out += text(x, y+48, tag, "small", "middle")
-        out += text(x, y+63, label, "small", "middle")
-        out += text(x, y+78, rating, "small", "middle")
-        out += wire_no(x+34, y-18, cable)
-        out += term_no(x-42, y+94, terminal)
-        out += ln(x+28, y+18, x+48, y+18, "wire")
-        out += f'<path d="M{x+48} {y+18} L{x+63} {y+18} M{x+51} {y+23} L{x+60} {y+23} M{x+54} {y+28} L{x+57} {y+28}" stroke="#111" stroke-width="1.2"/>'
+    def motor_symbol(x, y, tag, label, rating, cable=""):
+        out = f'<circle cx="{x}" cy="{y}" r="30" fill="white" stroke="#111" stroke-width="1.5"/>'
+        out += mtext(x, y-4, "M", "head")
+        out += mtext(x, y+12, "3~", "small")
+        out += mtext(x, y+50, tag, "small")
+        out += mtext(x, y+66, label, "small")
+        out += mtext(x, y+94, rating, "small", "middle", "#111")
+        if cable:
+            out += mtext(x, y+110, cable, "small", "middle", "#003399")
+        out += ln(x+30, y+17, x+54, y+17, "wire")
+        out += f'<path d="M{x+54} {y+17} L{x+72} {y+17} M{x+57} {y+22} L{x+69} {y+22} M{x+60} {y+27} L{x+66} {y+27}" stroke="#111" stroke-width="1.2"/>'
         return out
 
     def notes_box(x, y, ww, hh, title, lines):
         out = f'<rect x="{x}" y="{y}" width="{ww}" height="{hh}" fill="white" stroke="#111" stroke-width="1.3"/>'
-        out += text(x+ww/2, y+17, title, "small", "middle")
-        yy = y + 36
+        out += mtext(x+ww/2, y+17, title, "small")
+        yy = y + 37
         for line in lines:
-            out += text(x+10, yy, line, "small")
+            out += mtext(x+10, yy, line, "small", "start", "#111", 12)
             yy += 15
         return out
 
-    # Calculated ratings
-    total_a = 0.0
-    for c in circuits:
-        qty = project.number_of_compressors if project.configuration.startswith("Tandem") else 1
-        total_a += (c.compressor_flc_a if c.compressor_flc_a > 0 else flc_3ph(c.compressor_kw, elec.main_voltage_v)) * qty
+    # Basic calculated values
+    comp_qty = project.number_of_compressors if project.configuration.startswith("Tandem") else len(circuits)
+    first_c = circuits[0] if circuits else None
+    comp_flc = (first_c.compressor_flc_a if first_c and first_c.compressor_flc_a > 0 else flc_3ph(first_c.compressor_kw if first_c else 15, elec.main_voltage_v))
     pump_flc = water.pump_flc_a if water.pump_flc_a > 0 else flc_3ph(water.pump_kw, elec.main_voltage_v)
     fan_flc = fan.flc_a_each if fan.flc_a_each > 0 else motor_flc(fan.motor_kw_each, fan.voltage_v, fan.phase)
-    total_a += pump_flc * water.pump_qty + fan_flc * fan.qty
+    total_a = comp_flc*comp_qty + pump_flc*water.pump_qty + fan_flc*fan.qty
     q1_rating = next_std(max(1.0, total_a*1.25), STANDARD_BREAKERS_A)
     q1_ka = q1_breaking_capacity(elec.available_fault_ka)
 
+    # Start SVG
     s = svg_start(w, h, f"{project.project_name} - Electrical & Control Diagram")
-    s += '<rect x="8" y="50" width="1584" height="980" fill="white" stroke="#111" stroke-width="1.3"/>'
-    s += '<line x1="900" y1="55" x2="900" y2="840" stroke="#111" stroke-width="1.4" stroke-dasharray="8 5"/>'
-    s += text(420, 72, "1) POWER CIRCUIT", "head", "middle")
-    s += text(1245, 72, f"2) CONTROL CIRCUIT ({elec.control_voltage})", "head", "middle")
-    s += text(20, 98, f"{esc(elec.phase)} {elec.main_voltage_v:.0f} V", "small")
-    s += text(20, 113, f"{elec.frequency_hz:.0f} Hz", "small")
+    s += '<rect x="10" y="50" width="1680" height="1030" fill="white" stroke="#111" stroke-width="1.3"/>'
+    s += '<line x1="905" y1="55" x2="905" y2="850" stroke="#111" stroke-width="1.4" stroke-dasharray="8 5"/>'
+    s += mtext(455, 72, "1) POWER CIRCUIT", "head")
+    s += mtext(1295, 72, f"2) CONTROL CIRCUIT ({elec.control_voltage})", "head")
+    s += mtext(24, 100, f"{elec.phase} {elec.main_voltage_v:.0f} V\n{elec.frequency_hz:.0f} Hz", "small", "start")
 
-    # POWER CIRCUIT top
-    qx, qy = 88, 118
+    # Incoming power
+    qx, qy = 105, 126
     for i, lab in enumerate(["L1","L2","L3"]):
         xx = qx + i*42
-        s += text(xx, qy-20, lab, "small", "middle")
-        s += ln(xx, qy-10, xx, qy+142, "wire")
-    s += three_pole_switch(qx, qy, "Q1", f"MAIN ISOLATOR / MCCB\\n{q1_rating}A {q1_ka}kA")
-    s += wire_no(qx-15, qy+83, "P001/P002/P003")
+        s += mtext(xx, qy-28, lab, "small")
+        s += ln(xx, qy-12, xx, 304, "wire")
+    s += three_pole_device(qx, qy, "Q1", "MAIN ISOLATOR\n/ MCCB", f"{q1_rating}A {q1_ka}kA")
+    s += tagtext(qx-20, 218, "P001/P002/P003", "#003399")
 
-    # PR1 and transformer
-    s += bx(262, 122, 110, 60, "PR1\nPHASE FAILURE /\nSEQUENCE RELAY")
-    s += wire_no(270, 195, "P004")
-    s += bx(455, 112, 135, 75, f"T1\nCONTROL\nTRANSFORMER\n{elec.control_voltage}")
-    # transformer coils stylized
+    # PR1 and T1
+    s += small_box(258, 126, 125, 68, "PR1\nPHASE FAILURE /\nSEQUENCE RELAY")
+    s += small_box(505, 120, 150, 78, f"T1\nCONTROL\nTRANSFORMER\n{elec.control_voltage}")
+    s += ln(230, 158, 258, 158, "wire")
+    s += ln(383, 158, 450, 158, "wire")
+    # transformer stylized coil
     for i in range(5):
-        s += f'<path d="M{425+i*8} 125 C{415+i*8} 132,{415+i*8} 167,{425+i*8} 174" stroke="#111" fill="none" stroke-width="1.2"/>'
-        s += f'<path d="M{600+i*8} 125 C{610+i*8} 132,{610+i*8} 167,{600+i*8} 174" stroke="#111" fill="none" stroke-width="1.2"/>'
-    s += ln(214, 158, 262, 158, "wire")
-    s += ln(372, 158, 425, 158, "wire")
-    s += ln(640, 150, 760, 150, "wire")
-    s += circle(762, 150, 4)
-    s += text(690, 135, f"{elec.control_voltage}\nCONTROL SUPPLY", "small", "middle")
+        s += f'<path d="M{455+i*8} 128 C{445+i*8} 136,{445+i*8} 181,{455+i*8} 189" stroke="#111" fill="none" stroke-width="1.2"/>'
+        s += f'<path d="M{670+i*8} 128 C{680+i*8} 136,{680+i*8} 181,{670+i*8} 189" stroke="#111" fill="none" stroke-width="1.2"/>'
+    s += ln(700, 158, 800, 158, "wire")
+    s += f'<circle cx="803" cy="158" r="4" fill="white" stroke="#111" stroke-width="1.2"/>'
+    s += mtext(745, 137, f"{elec.control_voltage}\nCONTROL SUPPLY", "small")
+    s += tagtext(265, 210, "P004", "#003399")
+    s += tagtext(702, 178, "C001/C002", "#003399")
 
-    # horizontal power bus
-    bus_y = 310
-    s += ln(78, bus_y, 825, bus_y, "line")
-    s += ln(78, bus_y+12, 825, bus_y+12, "line")
-    s += ln(78, bus_y+24, 825, bus_y+24, "line")
-    s += text(520, bus_y-12, "3-PHASE BUS AFTER Q1", "small", "middle")
+    # 3 phase bus
+    bus_y = 320
+    s += ln(82, bus_y, 835, bus_y, "line")
+    s += ln(82, bus_y+12, 835, bus_y+12, "line")
+    s += ln(82, bus_y+24, 835, bus_y+24, "line")
 
-    # Power branches
+    # Branches: compressor(s), pump, fan1, fan2.
     branches = []
-    comp_qty = project.number_of_compressors if project.configuration.startswith("Tandem") else len(circuits)
     for i in range(comp_qty):
-        c = circuits[0] if project.configuration.startswith("Tandem") else circuits[i]
+        c = circuits[0] if project.configuration.startswith("Tandem") else circuits[min(i, len(circuits)-1)]
         flc = c.compressor_flc_a if c.compressor_flc_a > 0 else flc_3ph(c.compressor_kw, elec.main_voltage_v)
-        branches.append((f"KM-C{i+1}", f"OL-C{i+1}", f"M-C{i+1}", f"COMPRESSOR {i+1}", f"{c.compressor_kw:.1f} kW / {flc:.1f} A", f"CAB-C{i+1}", f"XT-C{i+1}"))
-    branches.append(("KM-P1", "OL-P1", "M-P1", "CHILLED WATER\nPUMP", f"{water.pump_kw:.1f} kW / {pump_flc:.1f} A", "CAB-P1", "XT-P1"))
+        branches.append((f"KM-C{i+1}", f"OL-C{i+1}", f"M-C{i+1}", f"COMPRESSOR\n{i+1}", f"{c.compressor_kw:.1f} kW / {flc:.1f} A", f"CAB-C{i+1}", flc))
+    branches.append(("KM-P1", "OL-P1", "M-P1", "CHILLED WATER\nPUMP", f"{water.pump_kw:.1f} kW / {pump_flc:.1f} A", "CAB-P1", pump_flc))
     for i in range(min(fan.qty, 2)):
-        branches.append((f"KM-F{i+1}", f"OL-F{i+1}", f"M-F{i+1}", f"CONDENSER\nFAN {i+1}", f"{fan.motor_kw_each:.2f} kW / {fan_flc:.1f} A", f"CAB-F{i+1}", f"XT-F{i+1}"))
+        branches.append((f"KM-F{i+1}", f"OL-F{i+1}", f"M-F{i+1}", f"CONDENSER\nFAN {i+1}", f"{fan.motor_kw_each:.2f} kW / {fan_flc:.1f} A", f"CAB-F{i+1}", fan_flc))
 
-    start_x = 90
+    start_x = 100
     spacing = 145 if len(branches) <= 5 else 122
-    for idx, (km, ol, mt, label, rating, cable, term) in enumerate(branches):
+    for idx, (km, ol, mt, label, rating, cab, load_a) in enumerate(branches):
         x = start_x + idx*spacing
-        # tap from bus
         for off in [0,12,24]:
-            s += ln(x+idx*0, bus_y+off, x, bus_y+off, "wire")
-        s += three_pole_switch(x-5, 345, km, "CONTACTOR")
-        s += overload3(x-5, 440, ol, "OVERLOAD\nRELAY", overload_range(float(re.search(r'/ ([0-9.]+) A', rating).group(1))) if "/ " in rating else "")
-        s += motor3(x+29, 570, mt, label, rating, cable, f"{term}:U/V/W/PE")
-        # vertical connection line
-        for off in [0,34,68]:
-            s += ln(x-5+off, bus_y+24, x-5+off, 345, "wire")
-            s += ln(x-5+off, 415, x-5+off, 440, "wire")
-            s += ln(x-5+off, 502, x+29, 542, "wire")
-    if fan.qty > 2:
-        s += text(710, 655, f"Additional fan branches M-F3...M-F{fan.qty} in schedules", "small")
+            s += ln(x + off/2, bus_y+24, x + off/2, 365, "wire")
+        s += three_pole_device(x-4, 365, km, "CONTACTOR")
+        s += overload_block(x-4, 462, ol, "OVERLOAD\nRELAY", overload_range(load_a))
+        s += motor_symbol(x+30, 602, mt, label, rating, cab)
 
-    # Crankcase heater branch on power side
-    s += bx(790, 410, 32, 92, "FCH\n2A")
-    s += bx(786, 535, 42, 110, "HTR1\nCOMP.\nC/CASE\nHEATER")
-    s += ln(805, bus_y+24, 805, 410, "wire")
-    s += ln(805, 502, 805, 535, "wire")
-    s += text(795, 665, "230 V AC", "small")
+    # Crankcase heater branch on right of power circuit
+    s += ln(824, bus_y+24, 824, 462, "wire")
+    s += small_box(804, 462, 40, 70, "FCH\n2A")
+    s += ln(824, 532, 824, 570, "wire")
+    s += small_box(796, 570, 56, 118, "HTR1\nCOMP.\nCRANKCASE\nHEATER")
+    s += mtext(824, 710, "230 V AC", "small")
 
-    # CONTROL CIRCUIT
-    xL, xN = 940, 1560
-    yTop, yBottom = 88, 807
-    s += text(xL, 77, "L", "head", "middle")
-    s += text(xN, 77, "N", "head", "middle")
-    s += ln(xL, yTop, xL, yBottom, "line")
-    s += ln(xN, yTop, xN, yBottom, "line")
+    # Control circuit rails
+    xL, xN = 950, 1650
+    rail_top, rail_bottom = 90, 825
+    s += mtext(xL, 80, "L", "head")
+    s += mtext(xN, 80, "N", "head")
+    s += ln(xL, rail_top, xL, rail_bottom, "line")
+    s += ln(xN, rail_top, xN, rail_bottom, "line")
 
-    # Top master rung
+    # Master control rung
     y = 112
-    s += wire_no(xL+5, y-10, "100")
-    s += ln(xL, y, xL+42, y, "wire")
-    s += bx(xL+42, y-16, 50, 32, "F1\n2A")
-    s += wire_no(xL+52, y+30, "101")
-    s += bx(xL+125, y-16, 62, 32, "Q2\n6A")
-    s += bx(xL+220, y-16, 72, 32, "E-STOP\nNC")
-    s += bx(xL+325, y-16, 72, 32, "S0 STOP\nNC")
-    s += ln(xL+92, y, xL+125, y, "wire")
-    s += ln(xL+187, y, xL+220, y, "wire")
-    s += ln(xL+292, y, xL+325, y, "wire")
-    s += ln(xL+397, y, xN, y, "wire")
-    s += wire_no(xL+410, y-10, "105")
+    s += ln(xL, y, xL+38, y, "wire")
+    s += small_box(xL+38, y-16, 55, 32, "F1\n2A")
+    s += small_box(xL+122, y-16, 62, 32, "Q2\n6A")
+    s += small_box(xL+220, y-16, 75, 32, "E-STOP\nNC")
+    s += small_box(xL+330, y-16, 75, 32, "S0 STOP\nNC")
+    s += ln(xL+93, y, xL+122, y, "wire")
+    s += ln(xL+184, y, xL+220, y, "wire")
+    s += ln(xL+295, y, xL+330, y, "wire")
+    s += ln(xL+405, y, xN, y, "wire")
+    s += tagtext(xL+4, y-14, "100")
+    s += tagtext(xL+102, y+27, "101")
+    s += tagtext(xL+410, y-14, "105")
 
-    # K0 bus rung
-    y = 164
+    # K0 NO control bus
+    y = 166
     s += contact_no(xL, y, "K0\nNO", "110")
-    s += ln(xL+52, y, xL+200, y, "wire")
-    s += text(xL+210, y+4, "CONTROL BUS AFTER F1, Q2, E-STOP, S0 & K0", "small")
-    s += term_no(xL+380, y+22, "LC BUS")
+    s += ln(xL+50, y, xL+235, y, "wire")
+    s += mtext(xL+245, y+4, "CONTROL BUS AFTER F1, Q2, E-STOP, S0 & K0", "small", "start")
+    s += mtext(xL+420, y+24, "LC BUS", "small", "start", "#990000")
 
-    rung_y = [232, 315, 392, 475, 550, 625, 700, 760]
-    # Rung numbering circles
-    for rn, yy in enumerate(rung_y[:7], 1):
-        s += circle(xL-28, yy, 12)
-        s += text(xL-28, yy+4, str(rn), "small", "middle")
+    # Rung numbers and rungs
+    rung_y = [244, 326, 410, 494, 578, 660, 742]
+    for rn, yy in enumerate(rung_y, 1):
+        s += f'<circle cx="{xL-28}" cy="{yy}" r="12" fill="white" stroke="#111" stroke-width="1.2"/>'
+        s += mtext(xL-28, yy+4, str(rn), "small")
 
     # Rung 1 pump
     y = rung_y[0]
     s += contact_no(xL, y, "SA1\nPUMP\nAUTO/MAN", "120")
-    s += bx(xL+95, y-35, 135, 70, "AUTO\n\nMAN", "dash")
-    s += contact_nc(xL+255, y, "OL-P\nNC", "121")
-    s += contact_no(xL+335, y, "S1\nPUMP ON\nNO", "122")
-    s += coil(xN-90, y, "KM-P1")
-    s += ln(xL+387, y, xN-90, y, "wire")
-    s += term_no(xL+338, y+38, "A1/A2")
-    s += lamp(xN-40, y+35, "H2")
+    s += small_box(xL+85, y-40, 155, 80, "AUTO\n\nMAN", "dash")
+    s += contact_nc(xL+275, y, "OL-P\nNC", "121")
+    s += contact_no(xL+365, y, "S1\nPUMP ON\nNO", "122")
+    s += ln(xL+415, y, xN-95, y, "wire")
+    s += coil(xN-95, y, "KM-P1")
+    s += lamp(xN-38, y+35, "H2")
 
     # Rung 2 YV1
     y = rung_y[1]
-    s += contact_no(xL, y, "TC1\nCOOL OUTPUT\nNO", "130")
-    s += coil(xN-105, y, "YV1")
-    s += ln(xL+52, y, xN-105, y, "wire")
-    s += text(xN-160, y-22, "SOLENOID VALVE\nFOR FREON", "small", "middle")
-    s += term_no(xN-175, y+36, "TB1-21/22")
-    s += lamp(xN-40, y+35, "H5")
+    s += contact_no(xL, y, "TC1\nCOOL\nOUTPUT", "130")
+    s += ln(xL+50, y, xN-110, y, "wire")
+    s += mtext(xN-165, y-34, "SOLENOID VALVE\nFOR FREON", "small")
+    s += coil(xN-110, y, "YV1")
+    s += lamp(xN-38, y+35, "H5")
 
-    # Rung 3 compressor chain
+    # Rung 3 compressor
     y = rung_y[2]
     x = xL
     contacts = [
-        ("KM-P\nNO", "300", ""),
-        (f"TD1\n{logic.pump_start_delay_s}s", "301", ""),
-        ("FS1\nNO", "302", "TB1-03/04"),
-        ("HPS\nNC\nMAN RESET", "303", "TB1-05/06"),
-        ("LPS\nNC\nPUMP-DOWN", "304", "TB1-07/08"),
-        ("FRZ1\nNC", "305", "TB1-09/10"),
-        ("PR1\nOK", "306", ""),
-        ("OL-C\nNC", "307", ""),
-        (f"AST\n{logic.anti_short_cycle_s}s", "308", ""),
+        ("KM-P\nNO", "300", False),
+        (f"TD1\n{logic.pump_start_delay_s}s", "301", False),
+        ("FS1\nNO", "302", False),
+        ("HPS\nNC\nMAN RESET", "303", True),
+        ("LPS\nNC\nPUMP-DOWN", "304", True),
+        ("FRZ1\nNC", "305", True),
+        ("PR1\nOK", "306", False),
+        ("OL-C\nNC", "307", True),
+        (f"AST\n{logic.anti_short_cycle_s}s", "308", False),
     ]
-    step = 62
-    for lab,wno,term in contacts:
-        if "NC" in lab or "RESET" in lab or "OK" in lab:
-            s += contact_nc(x, y, lab, wno)
-        else:
-            s += contact_no(x, y, lab, wno)
-        if term:
-            s += term_no(x, y+42, term)
+    step = 66
+    for lab, wno, nc in contacts:
+        s += contact_nc(x, y, lab, wno) if nc else contact_no(x, y, lab, wno)
         x += step
-    s += coil(xN-85, y, "KM-C1")
-    s += ln(x, y, xN-85, y, "wire")
-    s += lamp(xN-35, y+35, "H3")
+    s += ln(x, y, xN-95, y, "wire")
+    s += coil(xN-95, y, "KM-C1")
+    s += lamp(xN-38, y+35, "H3")
 
     # Rung 4 Fan1
     y = rung_y[3]
     x = xL
-    for lab,wno,term,nc in [("SA2\nFANS\nAUTO/MAN","500","",False),("KM-C\nNO","501","",False),("OL-F1\nNC","502","",True),("CPS1\nNO","503","TB1-11/12",False)]:
-        s += contact_nc(x,y,lab,wno) if nc else contact_no(x,y,lab,wno)
-        if term: s += term_no(x,y+42,term)
-        x += 90
-    s += coil(xN-85, y, "KM-F1")
-    s += ln(x, y, xN-85, y, "wire")
-    s += lamp(xN-35, y+35, "H6")
+    for lab,wno,nc in [("SA2\nFANS\nAUTO/MAN","500",False),("KM-C\nNO","501",False),("OL-F1\nNC","502",True),("CPS1\nNO","503",False)]:
+        s += contact_nc(x, y, lab, wno) if nc else contact_no(x, y, lab, wno)
+        x += 102
+    s += ln(x, y, xN-95, y, "wire")
+    s += coil(xN-95, y, "KM-F1")
+    s += lamp(xN-38, y+35, "H6")
 
     # Rung 5 Fan2
     y = rung_y[4]
     x = xL
-    for lab,wno,term,nc in [("SA2\nFANS\nAUTO/MAN","510","",False),("KM-C\nNO","511","",False),("OL-F2\nNC","512","",True),("CPS2\nNO","513","TB1-13/14",False)]:
-        s += contact_nc(x,y,lab,wno) if nc else contact_no(x,y,lab,wno)
-        if term: s += term_no(x,y+42,term)
-        x += 90
-    s += coil(xN-85, y, "KM-F2")
-    s += ln(x, y, xN-85, y, "wire")
-    s += lamp(xN-35, y+35, "H7")
+    for lab,wno,nc in [("SA2\nFANS\nAUTO/MAN","510",False),("KM-C\nNO","511",False),("OL-F2\nNC","512",True),("CPS2\nNO","513",False)]:
+        s += contact_nc(x, y, lab, wno) if nc else contact_no(x, y, lab, wno)
+        x += 102
+    s += ln(x, y, xN-95, y, "wire")
+    s += coil(xN-95, y, "KM-F2")
+    s += lamp(xN-38, y+35, "H7")
 
     # Rung 6 heater
     y = rung_y[5]
     s += contact_nc(xL, y, "KM-C\nNC", "600")
-    s += bx(xN-110, y-18, 85, 36, "HTR1\nCCH")
-    s += ln(xL+52, y, xN-110, y, "wire")
-    s += lamp(xN-35, y+35, "H4")
+    s += ln(xL+50, y, xN-110, y, "wire")
+    s += small_box(xN-110, y-19, 78, 38, "HTR1\nCCH")
+    s += lamp(xN-38, y+35, "H4")
 
-    # Fault rungs
+    # Rung 7 faults
     y = rung_y[6]
-    s += contact_no(xL, y, "HPS\nTRIP", "610")
-    s += lamp(xL+80, y, "H8")
-    s += contact_no(xL+150, y, "LPS\nTRIP", "611")
-    s += lamp(xL+230, y, "H9")
-    s += contact_no(xL+300, y, "OL-C\nTRIP", "612")
-    s += lamp(xL+385, y, "H11")
-    s += contact_no(xL+460, y, "OL-P\nTRIP", "613")
-    s += lamp(xL+545, y, "H12")
-    s += term_no(xL+30, y+46, "TB1-31...36 BMS FAULTS")
+    x = xL
+    for lab, lamp_tag, wno in [("HPS\nTRIP","H8","610"),("LPS\nTRIP","H9","611"),("OL-C\nTRIP","H11","612"),("OL-P\nTRIP","H12","613")]:
+        s += contact_no(x, y, lab, wno)
+        s += lamp(x+85, y, lamp_tag)
+        x += 170
 
-    # Bottom legends like reference
-    s += notes_box(18, 850, 420, 150, "LEGEND (SYMBOLS & ABBREVIATIONS)", [
-        "KM  Contactor          OL  Overload relay          M  Motor",
-        "FS  Flow switch        HPS High pressure switch    LPS Low pressure switch",
-        "CPS Condenser pressure switch     TC Temperature controller",
-        "YV  Solenoid valve     TD/AST Timers     K0 Master relay",
-        "Blue text = wire/cable number. Red text = terminal number."
+    # Terminal reference note
+    s += mtext(1045, 814, "Field terminals: TB1-03/04 FS1, TB1-05/06 HPS, TB1-07/08 LPS, TB1-11/12 CPS1, TB1-13/14 CPS2", "small", "start", "#990000")
+
+    # Bottom boxes
+    s += notes_box(18, 865, 430, 165, "LEGEND (SYMBOLS & ABBREVIATIONS)", [
+        "KM Contactor      OL Overload relay      M Motor",
+        "FS Flow switch    HPS High pressure switch    LPS Low pressure switch",
+        "CPS Condenser pressure switch    TC Temperature controller",
+        "YV Solenoid valve    TD/AST Timers    K0 Master relay",
+        "Blue text = wire/cable number. Terminal details are in schedules."
     ])
-    s += notes_box(455, 850, 430, 150, "POWER CIRCUIT NOTES", [
+    s += notes_box(465, 865, 440, 165, "POWER CIRCUIT NOTES", [
         f"1. Q1 main MCCB approx. {q1_rating} A, Icu >= {q1_ka} kA.",
         "2. PR1 monitors phase failure and sequence.",
         "3. OL relays are selected from motor FLC/RLA.",
         "4. Cable tags CAB-C/P/F are listed in cable schedule.",
         "5. Final cable sizing requires derating and voltage-drop check."
     ])
-    s += notes_box(905, 850, 660, 150, "CONTROL CIRCUIT NOTES (OPERATIONAL FEATURES)", [
+    s += notes_box(925, 865, 745, 165, "CONTROL CIRCUIT NOTES (OPERATIONAL FEATURES)", [
         "1. K0 master relay creates protected LC control bus after F1, Q2, E-stop and stop.",
         "2. Pump-first: pump runs and FS1 must prove water flow before compressor starts.",
         "3. Pump-down: TC1 opens YV1; LPS stops compressor at low suction pressure.",
         "4. HPS is manual reset. CPS1/CPS2 stage condenser fans by head pressure.",
         "5. AST prevents rapid compressor restart. HTR1 energizes when compressor is OFF."
     ])
+
     s += "</svg>"
     return s
 
