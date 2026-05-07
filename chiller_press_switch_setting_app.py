@@ -18,7 +18,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-APP_VERSION = "v13-generic-multicircuit-datasheet-assistant"
+APP_VERSION = "v14-generic-manual-or-datasheet-inputs"
 
 try:
     from CoolProp.CoolProp import PropsSI
@@ -380,6 +380,210 @@ COMPONENT_UPLOADS = [
     ("controller", "Temperature controller"),
 ]
 
+
+# Manual input table template used when no datasheet is uploaded, or when the user wants to override extracted values.
+# Keep the field names stable because the app maps many of them into the normal input widgets.
+MANUAL_COMPONENT_ROWS = [
+    # Refrigerant circuit / compressor basis
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "compressor_make", "Value": "", "Unit": "", "Notes": "Example: Copeland, Danfoss, Bitzer"},
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "compressor_model", "Value": "", "Unit": "", "Notes": "Exact compressor model"},
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "refrigerant", "Value": "R407C", "Unit": "", "Notes": "R134a/R407C/R410A/etc."},
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "approved_refrigerants", "Value": "", "Unit": "", "Notes": "Comma separated refrigerants approved by supplier"},
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "compressor_kw", "Value": "", "Unit": "kW", "Notes": "Motor input / nominal motor kW"},
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "compressor_flc_a", "Value": "", "Unit": "A", "Notes": "RLA/FLC/MCC, as per datasheet/nameplate"},
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "compressor_lra_a", "Value": "", "Unit": "A", "Notes": "Locked rotor current"},
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "cooling_capacity_kw", "Value": "", "Unit": "kW", "Notes": "Circuit cooling capacity"},
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "max_high_pressure_barg", "Value": "", "Unit": "bar(g)", "Notes": "System/compressor max high side pressure"},
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "max_condensing_temp_c", "Value": "", "Unit": "°C", "Notes": "Max allowed condensing temperature"},
+    {"Use": True, "Component": "compressor", "Circuit": "c1", "Field": "min_evaporating_temp_c", "Value": "", "Unit": "°C", "Notes": "Min allowed evaporating temperature"},
+    {"Use": True, "Component": "refrigerant_design", "Circuit": "c1", "Field": "evap_temp_c", "Value": "", "Unit": "°C", "Notes": "Design evaporating temperature"},
+    {"Use": True, "Component": "refrigerant_design", "Circuit": "c1", "Field": "cond_temp_c", "Value": "", "Unit": "°C", "Notes": "Design condensing temperature"},
+    {"Use": True, "Component": "refrigerant_design", "Circuit": "c1", "Field": "superheat_k", "Value": "", "Unit": "K", "Notes": "Superheat"},
+    {"Use": True, "Component": "refrigerant_design", "Circuit": "c1", "Field": "subcooling_k", "Value": "", "Unit": "K", "Notes": "Subcooling"},
+    {"Use": True, "Component": "refrigerant_design", "Circuit": "c1", "Field": "liquid_line_mm", "Value": "", "Unit": "mm", "Notes": "Liquid line OD / equivalent size"},
+    {"Use": True, "Component": "refrigerant_design", "Circuit": "c1", "Field": "suction_line_mm", "Value": "", "Unit": "mm", "Notes": "Suction line OD / equivalent size"},
+    {"Use": True, "Component": "refrigerant_design", "Circuit": "c1", "Field": "discharge_line_mm", "Value": "", "Unit": "mm", "Notes": "Discharge line OD / equivalent size"},
+    # Water / pump
+    {"Use": True, "Component": "water_system", "Circuit": "common", "Field": "entering_c", "Value": "", "Unit": "°C", "Notes": "Entering chilled water temperature"},
+    {"Use": True, "Component": "water_system", "Circuit": "common", "Field": "leaving_c", "Value": "", "Unit": "°C", "Notes": "Leaving chilled water temperature"},
+    {"Use": True, "Component": "water_system", "Circuit": "common", "Field": "flow_lps", "Value": "", "Unit": "L/s", "Notes": "Design water/glycol flow"},
+    {"Use": True, "Component": "water_system", "Circuit": "common", "Field": "glycol_percent", "Value": "", "Unit": "%", "Notes": "0 for water"},
+    {"Use": True, "Component": "water_system", "Circuit": "common", "Field": "pipe_mm", "Value": "", "Unit": "mm", "Notes": "Water pipe size"},
+    {"Use": True, "Component": "pump", "Circuit": "common", "Field": "pump_kw", "Value": "", "Unit": "kW", "Notes": "Pump motor kW"},
+    {"Use": True, "Component": "pump", "Circuit": "common", "Field": "pump_flc_a", "Value": "", "Unit": "A", "Notes": "Pump nameplate FLC"},
+    {"Use": True, "Component": "pump", "Circuit": "common", "Field": "pump_head_m", "Value": "", "Unit": "m", "Notes": "Pump head"},
+    {"Use": True, "Component": "pump", "Circuit": "common", "Field": "pump_qty", "Value": "", "Unit": "nos", "Notes": "Pump quantity"},
+    # Fans
+    {"Use": True, "Component": "fan", "Circuit": "common", "Field": "fan_qty", "Value": "", "Unit": "nos", "Notes": "Number of condenser fans"},
+    {"Use": True, "Component": "fan", "Circuit": "common", "Field": "fan_kw_each", "Value": "", "Unit": "kW", "Notes": "Fan motor kW each"},
+    {"Use": True, "Component": "fan", "Circuit": "common", "Field": "fan_flc_a_each", "Value": "", "Unit": "A", "Notes": "Fan motor FLC each"},
+    {"Use": True, "Component": "fan", "Circuit": "common", "Field": "fan_voltage_v", "Value": "", "Unit": "V", "Notes": "Fan voltage"},
+    {"Use": True, "Component": "fan", "Circuit": "common", "Field": "fan_phase", "Value": "", "Unit": "", "Notes": "1-phase or 3-phase"},
+    # Electrical supply and control
+    {"Use": True, "Component": "electrical", "Circuit": "common", "Field": "main_voltage_v", "Value": "", "Unit": "V", "Notes": "Main supply voltage"},
+    {"Use": True, "Component": "electrical", "Circuit": "common", "Field": "main_phase", "Value": "", "Unit": "", "Notes": "1-phase or 3-phase"},
+    {"Use": True, "Component": "electrical", "Circuit": "common", "Field": "frequency_hz", "Value": "", "Unit": "Hz", "Notes": "Supply frequency"},
+    {"Use": True, "Component": "electrical", "Circuit": "common", "Field": "control_voltage", "Value": "", "Unit": "", "Notes": "230 VAC / 110 VAC / 24 VAC / 24 VDC"},
+    {"Use": True, "Component": "electrical", "Circuit": "common", "Field": "available_fault_ka", "Value": "", "Unit": "kA", "Notes": "Panel fault level for MCCB breaking capacity"},
+    # Logic / safety
+    {"Use": True, "Component": "logic", "Circuit": "common", "Field": "chw_setpoint_c", "Value": "", "Unit": "°C", "Notes": "Controller setpoint"},
+    {"Use": True, "Component": "logic", "Circuit": "common", "Field": "temp_differential_k", "Value": "", "Unit": "K", "Notes": "Controller differential"},
+    {"Use": True, "Component": "logic", "Circuit": "common", "Field": "freeze_stat_c", "Value": "", "Unit": "°C", "Notes": "Freeze protection setting"},
+    {"Use": True, "Component": "logic", "Circuit": "common", "Field": "anti_short_cycle_s", "Value": "", "Unit": "s", "Notes": "Compressor anti-short-cycle timer"},
+    {"Use": True, "Component": "logic", "Circuit": "common", "Field": "pumpdown_max_s", "Value": "", "Unit": "s", "Notes": "Maximum pump-down time"},
+    {"Use": True, "Component": "logic", "Circuit": "common", "Field": "crankcase_preheat_h", "Value": "", "Unit": "h", "Notes": "0 if no crankcase heater"},
+]
+
+
+def _clean_manual_value(value: Any) -> str:
+    if value is None:
+        return ""
+    # pandas may send NaN values back from the editor
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _manual_float(value: Any) -> float | None:
+    s = _clean_manual_value(value)
+    if not s:
+        return None
+    try:
+        return float(s.replace(",", ""))
+    except Exception:
+        return None
+
+
+def _manual_int(value: Any) -> int | None:
+    v = _manual_float(value)
+    return None if v is None else int(round(v))
+
+
+def _manual_setdefault(key: str, value: Any, cast: str = "float") -> None:
+    if value in (None, ""):
+        return
+    try:
+        if cast == "int":
+            st.session_state.setdefault(key, int(round(float(value))))
+        elif cast == "float":
+            st.session_state.setdefault(key, float(value))
+        else:
+            st.session_state.setdefault(key, str(value))
+    except Exception:
+        # Do not break the app for one bad manual entry. The table remains visible for correction.
+        pass
+
+
+def manual_rows_to_dict(df: pd.DataFrame) -> Dict[str, Any]:
+    """Convert editable manual table rows into a flat dictionary."""
+    out: Dict[str, Any] = {}
+    if df is None or df.empty:
+        return out
+    for _, row in df.iterrows():
+        try:
+            if bool(row.get("Use", True)) is False:
+                continue
+        except Exception:
+            pass
+        field = _clean_manual_value(row.get("Field"))
+        value = _clean_manual_value(row.get("Value"))
+        if field and value:
+            out[field] = value
+    return out
+
+
+def apply_manual_inputs_to_widgets(manual: Dict[str, Any]) -> None:
+    """Pre-fill the normal detailed input widgets from the manual table.
+
+    Uses setdefault so the user can still override values in the normal tabs after first load.
+    """
+    # Circuit 1 defaults. Users can duplicate/adapt fields for c2 manually in the normal circuit forms.
+    str_map = {
+        "compressor_make": "c1_make", "compressor_model": "c1_model", "approved_refrigerants": "c1_approved",
+        "fan_phase": "fan_phase", "main_phase": "main_phase", "control_voltage": "control_voltage",
+    }
+    float_map = {
+        "compressor_kw": "c1_kw", "compressor_flc_a": "c1_flc", "compressor_lra_a": "c1_lra",
+        "cooling_capacity_kw": "c1_cap", "max_high_pressure_barg": "c1_maxhp",
+        "max_condensing_temp_c": "c1_maxcond", "min_evaporating_temp_c": "c1_minevap",
+        "evap_temp_c": "c1_evap", "cond_temp_c": "c1_cond", "superheat_k": "c1_sh", "subcooling_k": "c1_sc",
+        "liquid_line_mm": "c1_liq", "suction_line_mm": "c1_suc", "discharge_line_mm": "c1_dis",
+        "entering_c": "ewt", "leaving_c": "lwt", "flow_lps": "flow", "glycol_percent": "glycol", "pipe_mm": "waterpipe",
+        "pump_kw": "pumpkw", "pump_flc_a": "pumpflc", "pump_head_m": "pumphead",
+        "fan_kw_each": "fankw", "fan_flc_a_each": "fanflc", "fan_voltage_v": "fanvolt",
+        "main_voltage_v": "mainv", "frequency_hz": "hz", "available_fault_ka": "faultka",
+        "chw_setpoint_c": "sp", "temp_differential_k": "diff", "freeze_stat_c": "frz",
+        "crankcase_preheat_h": "preheat",
+    }
+    int_map = {
+        "pump_qty": "pumpqty", "fan_qty": "fan_qty", "anti_short_cycle_s": "anti_short_cycle", "pumpdown_max_s": "max_pumpdown",
+    }
+    for src, key in str_map.items():
+        value = _clean_manual_value(manual.get(src))
+        if value:
+            # Normalize expected selectbox options where possible.
+            if src in ["fan_phase", "main_phase"]:
+                value_l = value.lower().replace(" ", "")
+                value = "1-phase" if "1" in value_l or "single" in value_l else "3-phase"
+            if src == "control_voltage":
+                value_u = value.upper().replace("V AC", "VAC").replace("VDC", " VDC")
+                if "24" in value_u and "DC" in value_u:
+                    value = "24 VDC"
+                elif "24" in value_u:
+                    value = "24 VAC"
+                elif "110" in value_u:
+                    value = "110 VAC"
+                else:
+                    value = "230 VAC"
+            _manual_setdefault(key, value, "str")
+    for src, key in float_map.items():
+        val = _manual_float(manual.get(src))
+        _manual_setdefault(key, val, "float")
+    for src, key in int_map.items():
+        val = _manual_int(manual.get(src))
+        _manual_setdefault(key, val, "int")
+
+    # Refrigerant selectbox needs an exact value from REFS.
+    ref = _clean_manual_value(manual.get("refrigerant"))
+    if ref:
+        ref_norm = REF_ALIASES.get(ref.upper().replace(" ", ""), ref)
+        if ref_norm in REFS:
+            st.session_state.setdefault("c1_ref", ref_norm)
+
+
+def manual_component_inputs_ui() -> pd.DataFrame:
+    st.subheader("Manual / verified component input table")
+    st.caption("Use this table when you do not want to upload datasheets, or to record verified values from nameplates/catalogues. Values entered here pre-fill the normal detailed input tabs below; the normal tabs remain the final editable engineering inputs.")
+    if "manual_component_inputs_df" not in st.session_state:
+        st.session_state["manual_component_inputs_df"] = pd.DataFrame(MANUAL_COMPONENT_ROWS)
+    edited = st.data_editor(
+        st.session_state["manual_component_inputs_df"],
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Use": st.column_config.CheckboxColumn("Use", default=True),
+            "Component": st.column_config.SelectboxColumn("Component", options=[x[0] for x in COMPONENT_UPLOADS] + ["refrigerant_design", "water_system", "electrical", "logic", "other"]),
+            "Circuit": st.column_config.TextColumn("Circuit", help="Use c1, c2, common, etc."),
+            "Field": st.column_config.TextColumn("Field", help="Stable field name used by the app mapping."),
+            "Value": st.column_config.TextColumn("Value", help="Enter numeric or text value."),
+            "Unit": st.column_config.TextColumn("Unit"),
+            "Notes": st.column_config.TextColumn("Notes"),
+        },
+        key="manual_component_inputs_editor",
+    )
+    st.session_state["manual_component_inputs_df"] = edited
+    manual = manual_rows_to_dict(edited)
+    st.session_state["manual_component_inputs"] = manual
+    apply_manual_inputs_to_widgets(manual)
+    if manual:
+        st.success(f"Manual input table has {len(manual)} usable values. These values are used as pre-fill defaults; verify them in the detailed tabs.")
+        st.download_button("Download manual input table CSV", edited.to_csv(index=False).encode("utf-8"), "manual_component_inputs.csv", "text/csv")
+    return edited
+
 def normalize_text(text: str) -> str:
     return re.sub(r"[ \t]+", " ", text.replace("\u00a0", " ")).strip()
 
@@ -539,8 +743,12 @@ def apply_component_defaults(extracted: Dict[str, Dict[str, Any]]) -> None:
     if extracted.get("evaporator_phe", {}): st.session_state["evaporator_phe_summary"] = extracted.get("evaporator_phe")
 
 def component_uploads_ui() -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame]:
-    st.subheader("Upload component datasheets")
-    st.info("Upload one PDF per component. The app extracts likely values, then you must verify/correct the engineering inputs before generating drawings.")
+    st.subheader("Component input method")
+    st.info("You can either upload datasheets, manually enter values in a table, or use both. The normal detailed tabs remain the final editable engineering inputs.")
+    manual_df = manual_component_inputs_ui()
+    st.markdown("---")
+    st.subheader("Optional upload of component datasheets")
+    st.caption("Upload one PDF per component if available. If not, leave these uploaders empty and use the manual table above.")
     extracted: Dict[str, Dict[str, Any]] = {}
     rows: List[Dict[str, Any]] = []
     cols = st.columns(3)
@@ -564,7 +772,7 @@ def component_uploads_ui() -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame]:
         st.dataframe(df, width="stretch", hide_index=True)
         st.download_button("Download extraction table CSV", df.to_csv(index=False).encode("utf-8"), "component_datasheet_extraction.csv", "text/csv")
     else:
-        st.warning("No datasheets uploaded yet. You can still enter all values manually.")
+        st.info("No datasheets uploaded. The manual input table above can be used for all required values.")
     st.session_state["component_extracted"] = extracted
     apply_component_defaults(extracted)
     return extracted, df
@@ -1948,11 +2156,11 @@ def electrical_form() -> Electrical:
     c1,c2,c3,c4=st.columns(4)
     with c1:
         v=nfloat("Main voltage V",415.0,"mainv",1.0,0.0)
-        ph=st.selectbox("Main supply", ["3-phase", "1-phase"])
+        ph=st.selectbox("Main supply", ["3-phase", "1-phase"], key="main_phase")
         hz=nfloat("Frequency Hz",50.0,"hz",1.0,0.0)
         manufacturer=st.selectbox("Preferred electrical manufacturer", ["Schneider Electric", "Generic"], index=0)
     with c2:
-        cv=st.selectbox("Control voltage", ["230 VAC", "110 VAC", "24 VAC", "24 VDC"])
+        cv=st.selectbox("Control voltage", ["230 VAC", "110 VAC", "24 VAC", "24 VDC"], key="control_voltage")
         cs=st.selectbox("Compressor starter", ["DOL", "Star-delta", "Soft starter", "VFD"])
         ps=st.selectbox("Pump starter", ["DOL", "Star-delta", "Soft starter", "VFD"])
         fault_ka=nfloat("Available fault level kA",25.0,"faultka",1.0,1.0)
@@ -2064,7 +2272,7 @@ def main():
     if not check_password():
         st.stop()
     st.title("Chiller Electrical, Freon and Chilled Water Circuit Generator")
-    st.caption(f"Full generic Streamlit app: multiple circuits/compressors/tandem, 1-phase or 3-phase, component datasheets → settings → schematics → BOM. App version: {APP_VERSION}")
+    st.caption(f"Full generic Streamlit app: multiple circuits/compressors/tandem, 1-phase or 3-phase, manual component table and/or datasheets → settings → schematics → BOM. App version: {APP_VERSION}")
     with st.sidebar:
         st.header("Settings")
         pressure_unit = st.radio("Pressure unit", ["bar(g)", "bar(abs)", "psig"], index=0)
@@ -2156,6 +2364,10 @@ def main():
 
         st.subheader("Drawing sheet index")
         st.dataframe(drawing_sheet_index(),width="stretch",hide_index=True)
+
+        if "manual_component_inputs_df" in st.session_state:
+            st.subheader("Manual / verified component input table")
+            st.dataframe(st.session_state["manual_component_inputs_df"], width="stretch", hide_index=True)
 
         st.subheader("Component specifications")
         st.dataframe(specs,width="stretch",hide_index=True)
