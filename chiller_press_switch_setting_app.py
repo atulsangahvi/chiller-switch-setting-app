@@ -18,7 +18,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-APP_VERSION = "v9-clean-reference-diagram"
+APP_VERSION = "v13-generic-multicircuit-datasheet-assistant"
 
 try:
     from CoolProp.CoolProp import PropsSI
@@ -364,6 +364,210 @@ def parse_compressor_pdf(text: str) -> Dict[str, Any]:
         out["compressor_lra_a"] = float(lra)
     return out
 
+
+
+# ---------------- multi-component datasheet extraction ----------------
+
+COMPONENT_UPLOADS = [
+    ("compressor", "Compressor"),
+    ("fan", "Condenser fan"),
+    ("condenser_coil", "Condenser coil"),
+    ("evaporator_phe", "Evaporator / BPHE"),
+    ("pump", "Chilled water pump"),
+    ("txv", "Expansion valve / TXV"),
+    ("pressure_switch", "HP/LP pressure switch"),
+    ("solenoid", "Liquid line solenoid valve"),
+    ("controller", "Temperature controller"),
+]
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"[ \t]+", " ", text.replace("\u00a0", " ")).strip()
+
+def first_match(text: str, patterns: List[str], cast=None):
+    for pat in patterns:
+        m = re.search(pat, text, re.I | re.S)
+        if m:
+            val = m.group(1).strip()
+            if cast:
+                try:
+                    return cast(val.replace(",", ""))
+                except Exception:
+                    continue
+            return val
+    return None
+
+def find_all_refrigerants(text: str) -> str:
+    upper = text.upper().replace(" ", "")
+    refs = []
+    for alias, canon in REF_ALIASES.items():
+        if alias.replace(" ", "") in upper and canon not in refs:
+            refs.append(canon)
+    return ", ".join(refs)
+
+def guess_make(text: str, filename: str = "") -> str:
+    brands = ["Copeland", "Emerson", "Danfoss", "Hicool", "Hi cool", "Kaori", "Castel", "AKO", "Johnson Controls", "Spaino", "Serck", "Sanhua", "Sporlan", "Carel"]
+    blob = f"{filename}\n{text}"
+    for b in brands:
+        if re.search(re.escape(b), blob, re.I):
+            return b
+    return ""
+
+def parse_voltage_phase_freq(text: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    v = first_match(text, [r"(?:Voltage|V\s*AC|Power supply|Supply)\D{0,25}([0-9]{2,4}(?:/[0-9]{2,4})?)\s*V", r"([0-9]{2,4}(?:/[0-9]{2,4})?)\s*[- ]?(?:V|VAC|V AC)"])
+    if v:
+        nums = [float(x) for x in re.findall(r"[0-9]+", v)]
+        if nums:
+            out["voltage_v"] = nums[0] if len(nums) == 1 else max(nums)
+    hz = first_match(text, [r"([0-9]{2})\s*(?:Hz|HZ)", r"Frequency\D{0,20}([0-9]{2})"], float)
+    if hz: out["frequency_hz"] = hz
+    if re.search(r"\b1\s*(?:phase|ph|~)|1~|single\s*phase", text, re.I): out["phase"] = "1-phase"
+    elif re.search(r"\b3\s*(?:phase|ph|~)|3~|three\s*phase", text, re.I): out["phase"] = "3-phase"
+    return out
+
+def parse_current_power_air(text: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    cur = first_match(text, [r"(?:Current|FLC|RLA|Rated current|AMPS?)\D{0,35}([0-9]+(?:\.[0-9]+)?)\s*A", r"\b([0-9]+(?:\.[0-9]+)?)\s*A\b"], float)
+    if cur is not None: out["current_a"] = cur
+    watt = first_match(text, [r"(?:Watt|Power input|Input power|Rated power)\D{0,35}([0-9]+(?:\.[0-9]+)?)\s*W\b"], float)
+    kw = first_match(text, [r"([0-9]+(?:\.[0-9]+)?)\s*kW\b"], float)
+    if watt is not None:
+        out["watt_w"] = watt; out["kw"] = watt/1000.0
+    elif kw is not None: out["kw"] = kw
+    rpm = first_match(text, [r"(?:RPM|Speed)\D{0,30}([0-9]{3,5})"], float)
+    if rpm: out["rpm"] = rpm
+    airflow = first_match(text, [r"(?:Air\s*Flow|Airflow)\D{0,50}([0-9]+(?:\.[0-9]+)?)\s*(?:m3/h|m³/h)", r"([0-9]+(?:\.[0-9]+)?)\s*(?:m3/h|m³/h)"], float)
+    if airflow: out["airflow_m3h"] = airflow
+    return out
+
+def parse_component_text(component: str, text: str, filename: str = "") -> Dict[str, Any]:
+    text = normalize_text(text)
+    out: Dict[str, Any] = {"component_type": component, "source_file": filename, "make": guess_make(text, filename)}
+    out.update(parse_voltage_phase_freq(text))
+    refs = find_all_refrigerants(text)
+    if refs: out["refrigerants"] = refs
+    if component == "compressor":
+        out.update(parse_compressor_pdf(text)); out.update(parse_current_power_air(text))
+        model = out.get("compressor_model") or first_match(text, [r"\b(ZR[0-9A-Z\-]+|ZP[0-9A-Z\-]+|CR[0-9A-Z\-]+)\b", r"Model\s*(?:No\.?|Number)?\s*[:\-]?\s*([A-Z0-9\-_/]{4,40})"])
+        if model: out["model"] = model
+    elif component == "fan":
+        out.update(parse_current_power_air(text))
+        model = first_match(text, [r"\b(4E-400|4D-400|6E-400)\b", r"Model\D{0,30}([A-Z0-9\-]{3,30})"])
+        if model: out["model"] = model
+        cap = first_match(text, [r"Capacitor\D{0,20}([0-9]+(?:\.[0-9]+)?)\s*(?:µf|uF|uf)"], float)
+        if cap is not None: out["capacitor_uf"] = cap
+    elif component == "condenser_coil":
+        model = first_match(text, [r"Model Number\s*:?\s*([A-Z0-9\-\.]+)"])
+        if model: out["model"] = model
+        cap = first_match(text, [r"Total Capacity\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*kW", r"Capacity\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*kW"], float)
+        if cap is not None: out["capacity_kw"] = cap
+        cond = first_match(text, [r"Condensing Temperature\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*°?\s*C"], float)
+        if cond is not None: out["condensing_temp_c"] = cond
+        airflow = first_match(text, [r"Total Air Flow\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*m[³3]/s"], float)
+        if airflow is not None: out["airflow_m3s"] = airflow
+    elif component == "evaporator_phe":
+        model = first_match(filename + " " + text, [r"\b(K[0-9]{3}\-[0-9]+[A-Z]?)\b", r"\b(K[0-9]{3})\b"])
+        if model: out["model"] = model
+        cap = first_match(text, [r"Max\.?(?:imum)? Heat Transfer Capacity\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*KW", r"Capacity\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*kW"], float)
+        if cap is not None: out["max_capacity_kw"] = cap
+        wp = first_match(text, [r"Max\.?(?:imum)? working pressure\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*bar"], float)
+        if wp is not None: out["max_working_pressure_bar"] = wp
+        flow = first_match(text, [r"Max\.?(?:imum)? flow rate\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*LPM"], float)
+        if flow is not None: out["max_flow_lpm"] = flow
+        plates = first_match(filename + " " + text, [r"K050[- ]([0-9]{1,3})C", r"([0-9]{1,3})\s*plates"], float)
+        if plates: out["plates"] = plates
+    elif component == "pump":
+        out.update(parse_current_power_air(text))
+        model = first_match(filename + " " + text, [r"\b(SP\s*50|SP50)\b", r"Model\D{0,30}([A-Z0-9\-]{3,30})"])
+        if model: out["model"] = model.replace(" ", "")
+        flow = first_match(text, [r"Flow rate up to\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*l/min", r"([0-9]+(?:\.[0-9]+)?)\s*l/min"], float)
+        if flow: out["flow_lpm"] = flow
+        head = first_match(text, [r"Head up to\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*m", r"([0-9]+(?:\.[0-9]+)?)\s*m\s*head"], float)
+        if head: out["head_m"] = head
+    elif component == "txv":
+        model = first_match(text, [r"Type\s*(T\s*2|TE\s*2)", r"\b(T\s*2|TE\s*2)\b"])
+        if model: out["model"] = model.replace(" ", "")
+        ps = first_match(text, [r"PS\s*/\s*MWP\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*bar", r"Max\. working pressure\D{0,30}([0-9]+(?:\.[0-9]+)?)\s*bar"], float)
+        if ps is not None: out["max_working_pressure_bar"] = ps
+    elif component == "pressure_switch":
+        model = first_match(filename + " " + text, [r"\b(KP\s*15|KP\s*17|KP\s*47|KP\s*1)\b", r"\b(HPS[0-9]+|LPS[0-9]+)\b"])
+        if model: out["model"] = model.replace(" ", "")
+        out["reset_type"] = "manual HP / auto LP" if "KP15" in out.get("model", "") or "KP 15" in text else ("fixed / verify" if re.search(r"HPS|LPS", text, re.I) else "verify")
+        out["electrical_rating"] = first_match(text, [r"(AC[13]?\s*[-:]?\s*[0-9]+\s*A\s*/\s*[0-9]+\s*V)", r"([0-9]+\s*A\s*/\s*[0-9]+\s*V)"])
+    elif component == "solenoid":
+        model = first_match(text, [r"Product Code\s*([0-9A-Z/\-]+)", r"\b(1068/[0-9A-Z]+)\b"])
+        if model: out["model"] = model
+        ps = first_match(text, [r"PS\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*bar", r"PS\D{0,20}([0-9]+(?:\.[0-9]+)?)\s*bar"], float)
+        if ps is not None: out["pressure_rating_bar"] = ps
+        conn = first_match(text, [r"Connections?\s*ODS[^0-9]*(1/2|3/8|5/8|7/8|[0-9]+(?:\.[0-9]+)?)", r"(1/2\"\s*ODS)"])
+        if conn: out["connection"] = conn
+        kv = first_match(text, [r"Kv\s*\[?m[³3]/h\]?\D{0,10}([0-9]+(?:[\.,][0-9]+)?)"], lambda s: float(s.replace(',', '.')))
+        if kv is not None: out["kv_m3h"] = kv
+    elif component == "controller":
+        model = first_match(text, [r"\b(AKO-D[0-9A-Z\-]+)\b"])
+        if model: out["model"] = model
+        supply = first_match(text, [r"Power supply\D{0,30}([0-9]+\s*V[^\n,;]*)"])
+        if supply: out["power_supply"] = supply
+        relay = first_match(text, [r"Relay COOL\D{0,30}([0-9]+\s*A)", r"I max\.?\s*:?\s*([0-9]+\s*A)"])
+        if relay: out["relay_rating"] = relay
+    out["confidence"] = min(95, 20 + len([k for k,v in out.items() if v not in (None, "", [])]) * 8)
+    return out
+
+def apply_component_defaults(extracted: Dict[str, Dict[str, Any]]) -> None:
+    comp = extracted.get("compressor", {})
+    if comp:
+        if comp.get("compressor_flc_a") or comp.get("current_a"):
+            st.session_state.setdefault("c1_flc", float(comp.get("compressor_flc_a") or comp.get("current_a")))
+        if comp.get("compressor_lra_a"): st.session_state.setdefault("c1_lra", float(comp.get("compressor_lra_a")))
+        if comp.get("model"): st.session_state.setdefault("c1_model", str(comp.get("model")))
+        if comp.get("compressor_make") or comp.get("make"): st.session_state.setdefault("c1_make", str(comp.get("compressor_make") or comp.get("make")))
+        if comp.get("approved_refrigerants") or comp.get("refrigerants"): st.session_state.setdefault("c1_approved", str(comp.get("approved_refrigerants") or comp.get("refrigerants")))
+    fan_data = extracted.get("fan", {})
+    if fan_data:
+        if fan_data.get("current_a") is not None: st.session_state.setdefault("fanflc", float(fan_data["current_a"]))
+        if fan_data.get("kw") is not None: st.session_state.setdefault("fankw", float(fan_data["kw"]))
+        if fan_data.get("voltage_v") is not None: st.session_state.setdefault("fanvolt", float(fan_data["voltage_v"]))
+        if fan_data.get("phase") is not None: st.session_state.setdefault("fan_phase", fan_data["phase"])
+    pump = extracted.get("pump", {})
+    if pump:
+        if pump.get("current_a") is not None: st.session_state.setdefault("pumpflc", float(pump["current_a"]))
+        if pump.get("kw") is not None: st.session_state.setdefault("pumpkw", float(pump["kw"]))
+        if pump.get("head_m") is not None: st.session_state.setdefault("pumphead", float(pump["head_m"]))
+    coil = extracted.get("condenser_coil", {})
+    if coil.get("capacity_kw") is not None:
+        st.session_state.setdefault("c1_cond", float(coil.get("condensing_temp_c") or 57.0))
+    if extracted.get("evaporator_phe", {}): st.session_state["evaporator_phe_summary"] = extracted.get("evaporator_phe")
+
+def component_uploads_ui() -> Tuple[Dict[str, Dict[str, Any]], pd.DataFrame]:
+    st.subheader("Upload component datasheets")
+    st.info("Upload one PDF per component. The app extracts likely values, then you must verify/correct the engineering inputs before generating drawings.")
+    extracted: Dict[str, Dict[str, Any]] = {}
+    rows: List[Dict[str, Any]] = []
+    cols = st.columns(3)
+    for i, (key, label) in enumerate(COMPONENT_UPLOADS):
+        with cols[i % 3]:
+            f = st.file_uploader(label, type=["pdf"], key=f"upload_{key}")
+            if f is not None:
+                text, warnings = extract_pdf_text(f)
+                for w in warnings: st.warning(f"{label}: {w}")
+                parsed = parse_component_text(key, text, f.name) if text else {"component_type": key, "source_file": f.name, "confidence": 0}
+                extracted[key] = parsed
+                for k, v in parsed.items():
+                    if k in ["component_type", "source_file"]: continue
+                    rows.append({"Component": label, "Field": k, "Extracted value": v, "Source file": f.name, "Confidence %": parsed.get("confidence", "")})
+                with st.expander(f"Extracted text - {label}"):
+                    st.text_area(f"Text from {f.name}", text[:20000], height=180, key=f"text_{key}")
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        st.subheader("Extraction verification table")
+        st.caption("Use this table as a checklist. If anything is wrong, correct the actual input fields in the later tabs.")
+        st.dataframe(df, width="stretch", hide_index=True)
+        st.download_button("Download extraction table CSV", df.to_csv(index=False).encode("utf-8"), "component_datasheet_extraction.csv", "text/csv")
+    else:
+        st.warning("No datasheets uploaded yet. You can still enter all values manually.")
+    st.session_state["component_extracted"] = extracted
+    apply_component_defaults(extracted)
+    return extracted, df
 
 def pv(parsed: Dict[str, Any], key: str, default: Any) -> Any:
     return parsed.get(key, default)
@@ -771,7 +975,8 @@ def wire_schedule(project: Project, circuits: List[Circuit], water: Water, fan: 
     add("LC bus", "KM-F1 coil", "Fan 1 control rung", control_cable_desc(1.5, 1), "Through CPS1")
     if fan.qty >= 2:
         add("LC bus", "KM-F2 coil", "Fan 2 control rung", control_cable_desc(1.5, 1), "Through CPS2")
-    add("LC bus", "HTR1", "Crankcase heater rung", control_cable_desc(1.5, 1), "Through KM-C NC contact")
+    if logic.crankcase_preheat_h > 0:
+        add("LC bus", "HTR1", "Crankcase heater rung", control_cable_desc(1.5, 1), "Through KM-C NC contact")
     return pd.DataFrame(rows)
 
 
@@ -1728,7 +1933,7 @@ def fan_form() -> Fan:
     with c2:
         flc=nfloat("Fan FLC A each (0=estimate)",0.0,"fanflc",0.1,0.0)
         volt=nfloat("Fan voltage V",415.0,"fanvolt",1.0,0.0)
-        phase=st.selectbox("Fan phase", ["3-phase", "1-phase"])
+        phase=st.selectbox("Fan phase", ["3-phase", "1-phase"], key="fan_phase")
     with c3:
         ctrl=st.selectbox("Fan control", ["Pressure switch staging", "Pressure transducer + controller", "VFD", "EC fan 0-10 V", "Always ON with compressor"])
         cont=st.checkbox("Contactor per fan", True)
@@ -1783,7 +1988,7 @@ def logic_form(project: Project) -> Logic:
         minon=int(st.number_input("Min compressor ON sec", min_value=0, max_value=900, value=120, step=30, key="min_comp_on"))
         pdmax=int(st.number_input("Max pumpdown sec", min_value=0, max_value=600, value=90, step=10, key="max_pumpdown"))
     with c4:
-        pre=nfloat("Crankcase preheat h",8.0,"preheat",1.0,0.0)
+        pre=nfloat("Crankcase preheat h (0 = no crankcase heater)",8.0,"preheat",1.0,0.0)
         lead=st.checkbox("Lead/lag rotation",project.configuration.startswith("Tandem"))
         s2on=nfloat("Stage 2 ON offset K",2.0,"s2on",0.5,0.0)
         s2off=nfloat("Stage 2 OFF offset K",0.5,"s2off",0.5,0.0)
@@ -1859,7 +2064,7 @@ def main():
     if not check_password():
         st.stop()
     st.title("Chiller Electrical, Freon and Chilled Water Circuit Generator")
-    st.caption(f"Full preliminary Streamlit app: inputs → pressure switch settings → schematics → component specifications → BOM. App version: {APP_VERSION}")
+    st.caption(f"Full generic Streamlit app: multiple circuits/compressors/tandem, 1-phase or 3-phase, component datasheets → settings → schematics → BOM. App version: {APP_VERSION}")
     with st.sidebar:
         st.header("Settings")
         pressure_unit = st.radio("Pressure unit", ["bar(g)", "bar(abs)", "psig"], index=0)
@@ -1867,38 +2072,13 @@ def main():
     if PropsSI is None:
         st.error("CoolProp is not installed. Install requirements.txt before running pressure calculations.")
 
-    tabs = st.tabs(["1 Project", "2 Compressor PDF", "3 Refrigerant", "4 Water + Fans", "5 Electrical", "6 Logic", "7 Outputs"])
+    tabs = st.tabs(["1 Project", "2 Component Datasheets", "3 Refrigerant", "4 Water + Fans", "5 Electrical", "6 Logic", "7 Outputs"])
     with tabs[0]:
         project = project_form()
 
     with tabs[1]:
-        st.subheader("Compressor PDF upload and missing data check")
-        parsed: Dict[str,Any] = {}
-        uploaded = st.file_uploader("Upload compressor supplier PDF", type=["pdf"])
-        if uploaded:
-            text, warnings = extract_pdf_text(uploaded)
-            for w in warnings:
-                st.warning(w)
-            if text:
-                parsed = parse_compressor_pdf(text)
-                st.success(f"Candidate fields found: {len(parsed)}. Please verify before using.")
-                required = [
-                    ("compressor_make","Make"),
-                    ("compressor_model","Model"),
-                    ("approved_refrigerants","Approved refrigerants"),
-                    ("max_high_pressure_barg","Max high-side pressure"),
-                    ("max_condensing_temp_c","Max condensing temp"),
-                    ("min_evaporating_temp_c","Min evaporating temp"),
-                    ("compressor_flc_a","FLC/RLA"),
-                    ("compressor_lra_a","LRA"),
-                ]
-                st.dataframe(pd.DataFrame([{
-                    "Data":lab,
-                    "Status":"Found - verify" if k in parsed else "Missing",
-                    "Value":parsed.get(k,"")
-                } for k,lab in required]), width="stretch", hide_index=True)
-                with st.expander("Extracted text"):
-                    st.text_area("Text", text[:30000], height=250)
+        extracted_docs, extraction_df = component_uploads_ui()
+        parsed = extracted_docs.get("compressor", {})
 
     with tabs[2]:
         circuits=[]
